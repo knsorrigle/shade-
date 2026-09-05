@@ -11,6 +11,9 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private var overlay: OverlayWindow?
     private var trackingTimer: Timer?
     private var receivedFrame = false
+    private var frameCount = 0
+    private var rateTimer: Timer?
+    private let countLock = NSLock()
 
     init(bundleID: String, renderer: MetalRenderer, report: @escaping (String) -> Void) {
         self.bundleID = bundleID
@@ -64,6 +67,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             beginTrackingWindow()
+            beginRateReporting()
             scheduleNoFrameCheck()
             report("Waiting for frames from \(bundleID)…")
         } catch { report("Capture failed: \(error.localizedDescription)") }
@@ -72,6 +76,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else { return }
         receivedFrame = true
+        countLock.lock(); frameCount += 1; countLock.unlock()
         renderer.submit(pixelBuffer: pixelBuffer)
     }
 
@@ -82,6 +87,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         trackingTimer?.invalidate()
         trackingTimer = nil
+        rateTimer?.invalidate()
+        rateTimer = nil
         let stream = self.stream
         self.stream = nil
         Task { try? await stream?.stopCapture() }
@@ -104,6 +111,21 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
               let window = content.windows.first(where: { $0.windowID == targetWindowID }) else { return }
         await MainActor.run { self.overlay?.update(captureFrame: window.frame) }
+    }
+
+    /// Reports the delivered frame rate once a second. Whether frames are
+    /// arriving is otherwise invisible, and it is the first thing worth knowing
+    /// when the image does not change.
+    private func beginRateReporting() {
+        rateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.countLock.lock()
+            let count = self.frameCount
+            self.frameCount = 0
+            self.countLock.unlock()
+            guard self.receivedFrame else { return }
+            self.report("Capturing \(self.bundleID) — \(count) fps, \(self.renderer.effectDescription)")
+        }
     }
 
     /// Silence here almost always means the Screen Recording grant is missing or

@@ -47,6 +47,9 @@ final class AppModel: ObservableObject {
     @Published var effect: MetalRenderer.Effect = .cas { didSet { renderer?.setEffect(effect); refreshStatus() } }
     @Published var intensity: Float = 0.65 { didSet { renderer?.setIntensity(intensity); refreshStatus() } }
     @Published var color = BasicColor() { didSet { renderer?.setColor(color) } }
+    /// Paints the overlay a solid colour. Answers "is the overlay reaching the
+    /// screen at all", which no subtle effect can.
+    @Published var diagnosticTint = false { didSet { renderer?.setDiagnosticTint(diagnosticTint) } }
 
     @Published private(set) var presets: [PresetLibrary.Item] = []
     @Published private(set) var luts: [PresetLibrary.Item] = []

@@ -14,10 +14,7 @@ final class ShaderStore {
         let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         directory = root.appendingPathComponent("MetalShade/Shaders", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let defaultFile = directory.appendingPathComponent(Self.filename)
-        if !FileManager.default.fileExists(atPath: defaultFile.path) {
-            try ShaderSource.defaultMetal.write(to: defaultFile, atomically: true, encoding: .utf8)
-        }
+        try installDefaultIfNeeded()
         startWatching()
     }
 
@@ -49,8 +46,35 @@ final class ShaderStore {
     }
 }
 
+private extension ShaderStore {
+    /// Writes the bundled shader when absent, and replaces one left by an older
+    /// build. The uniform layout is a contract between this file and
+    /// `MetalRenderer`; a stale shader compiles but reads the wrong fields.
+    func installDefaultIfNeeded() throws {
+        let file = directory.appendingPathComponent(ShaderStore.filename)
+        let existing = try? String(contentsOf: file, encoding: .utf8)
+        if let existing, existing.contains(ShaderSource.versionMarker) { return }
+
+        if existing != nil {
+            var backup = directory.appendingPathComponent("\(ShaderStore.filename).bak")
+            var suffix = 2
+            while FileManager.default.fileExists(atPath: backup.path) {
+                backup = directory.appendingPathComponent("\(ShaderStore.filename).bak\(suffix)")
+                suffix += 1
+            }
+            try? FileManager.default.moveItem(at: file, to: backup)
+            NSLog("MetalShade: replaced a shader from an older build; previous kept as \(backup.lastPathComponent)")
+        }
+        try ShaderSource.defaultMetal.write(to: file, atomically: true, encoding: .utf8)
+    }
+}
+
 enum ShaderSource {
+    /// Bump whenever the uniform layout or entry points change.
+    static let versionMarker = "MetalShade shader v2"
+
     static let defaultMetal = #"""
+    // MetalShade shader v2
     #include <metal_stdlib>
     using namespace metal;
 
@@ -59,7 +83,16 @@ enum ShaderSource {
         float intensity; float3 padding;
         float4 domainMin; float4 domainMax;
         float4 colorAdjust; // brightness, contrast, saturation, temperature
+        float4 debug;       // x: tint strength, yzw: tint colour
     };
+
+    // Deliberately unmissable. Judging a sharpening filter by eye cannot
+    // distinguish "the shader did nothing" from "the overlay never reached the
+    // screen"; a strong tint answers that in one glance.
+    float3 debugTint(float3 c, constant EffectUniforms& u) {
+        if (u.debug.x <= 0.0) { return c; }
+        return mix(c, u.debug.yzw, u.debug.x);
+    }
     vertex VertexOut fullscreenVertex(uint id [[vertex_id]]) {
         float2 positions[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
         VertexOut out; out.position = float4(positions[id], 0.0, 1.0);
@@ -85,14 +118,14 @@ enum ShaderSource {
         float3 average = (n + e + w + so) * 0.25;
         float localRange = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
         float adaptive = u.intensity * (1.0 - smoothstep(0.2, 0.9, localRange));
-        return float4(basic(c + (c - average) * adaptive, u), 1.0);
+        return float4(debugTint(basic(c + (c - average) * adaptive, u), u), 1.0);
     }
     fragment float4 lutFragment(VertexOut in [[stage_in]], texture2d<float> input [[texture(0)]], texture3d<float> lut [[texture(1)]], constant EffectUniforms& u [[buffer(0)]]) {
         constexpr sampler s(address::clamp_to_edge, filter::linear);
         float3 c = input.sample(s, in.uv).rgb;
         float3 coord = clamp((c - u.domainMin.xyz) / max(u.domainMax.xyz - u.domainMin.xyz, float3(0.0001)), 0.0, 1.0);
         float3 graded = lut.sample(s, coord).rgb;
-        return float4(basic(mix(c, graded, u.intensity), u), 1.0);
+        return float4(debugTint(basic(mix(c, graded, u.intensity), u), u), 1.0);
     }
     """#
 }
