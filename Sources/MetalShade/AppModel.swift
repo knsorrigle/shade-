@@ -15,6 +15,24 @@ final class AppModel: ObservableObject {
         let text: String
     }
 
+    /// What the app is currently doing, so the panel can say when the effect
+    /// controls are not connected to anything.
+    enum RenderMode: Sendable {
+        case idle, selfTest, capturing
+
+        var explanation: String? {
+            switch self {
+            case .idle:
+                return "No target window. Relaunch with --bundle <bundle-id> to apply effects to a window."
+            case .selfTest:
+                return "Self-test draws a fixed calibration border and runs no shader. Effect and colour changes below are stored but will not alter anything on screen."
+            case .capturing:
+                return nil
+            }
+        }
+    }
+
+    @Published var renderMode: RenderMode = .idle
     @Published var status = "starting…"
     @Published var effectsEnabled = true { didSet { renderer?.setEffectsEnabled(effectsEnabled); refreshStatus() } }
     @Published var effect: MetalRenderer.Effect = .cas { didSet { renderer?.setEffect(effect); refreshStatus() } }

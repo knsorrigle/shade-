@@ -9,6 +9,19 @@ struct ControlPanelView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 statusHeader
+                if let explanation = model.renderMode.explanation {
+                    Label {
+                        Text(explanation)
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "info.circle")
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.10)))
+                }
                 Divider()
                 effectSection
                 Divider()
@@ -37,6 +50,9 @@ struct ControlPanelView: View {
 
     private var effectSection: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // The toggle sits outside the .disabled() subtree below. Inside it,
+            // switching effects off would disable the control that switches them
+            // back on.
             Toggle("Effects enabled", isOn: $model.effectsEnabled)
                 .toggleStyle(.switch)
             Text("Bypassing keeps the capture overlay live with a neutral shader; some full-screen games go black if it is removed.")
@@ -44,6 +60,12 @@ struct ControlPanelView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            effectControls
+        }
+    }
+
+    private var effectControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
             Picker("Effect", selection: $model.effect) {
                 ForEach(MetalRenderer.Effect.allCases) { effect in
                     Text(effect.title).tag(effect)
