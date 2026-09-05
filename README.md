@@ -9,19 +9,75 @@ now a menu-bar-only macOS app that captures one visible game window using
 ScreenCaptureKit, processes the captured texture with Metal, and places a
 click-through overlay above that window.
 
-## Run the overlay
+## Install
 
-Prerequisites: macOS 14+, Apple Silicon, Xcode command-line tools, and a
-running target game.
+Requirements: macOS 14+ and Apple Silicon.
+
+No release has been published yet. Until one is, build from source — see
+[Build and run](#build-and-run). Released builds will be notarized `.zip`
+archives with a published SHA-256 checksum; verify one before opening it:
+
+```bash
+shasum -a 256 -c MetalShade-<version>.zip.sha256
+```
+
+## Build and run
+
+Additional requirement: Xcode command-line tools, plus a running target game.
 
 ```bash
 ./scripts/build-app.sh
 open ./dist/MetalShade.app --args --bundle com.cdprojektred.cyberpunk.steam
 ```
 
+`build-app.sh` produces an **ad-hoc signed** bundle. macOS keys the Screen
+Recording grant to the code signature as well as the bundle identifier, and an
+ad-hoc signature changes on every rebuild, so a locally built MetalShade has to
+be re-approved in System Settings after each build. Pass
+`--sign "Developer ID Application: …"` to sign with a stable identity instead.
+
 On first run, grant **Screen Recording** permission to MetalShade, then quit
 and relaunch it. The app captures the first visible window owned by the bundle
 identifier. Its menu-bar icon is `MS`; it never appears in the Dock.
+
+## Control panel
+
+Choose **Control Panel…** from the menu-bar icon (or launch MetalShade without
+`--bundle`) to open the window. It holds everything the shortcuts do, plus the
+parts that previously had no interface at all:
+
+- Enable or bypass effects, pick sharpening or LUT grading, set intensity.
+- Brightness, contrast, saturation, and temperature sliders. These uniforms
+  existed before but could only be set by importing a preset.
+- A **Last import** panel listing every ReShade setting that could not be
+  honoured — including a specific note for depth-based effects. Those warnings
+  used to go only to the Console, so a preset could silently do almost nothing.
+
+The window and the global shortcuts share one state object, so they cannot
+drift apart.
+
+## Adding ReShade presets and LUTs
+
+Drag `.ini` presets and `.cube` LUTs onto the control panel's drop zone. Files
+are copied into a library folder, so a preset outlives the volume it came from:
+
+```text
+~/Library/Application Support/MetalShade/Presets/   # ReShade .ini
+~/Library/Application Support/MetalShade/LUTs/      # .cube
+```
+
+Both folders are watched. Dropping files into them in Finder is equivalent to
+dropping them on the window — the lists update either way, and deleting a file
+in Finder removes it from the app. **Presets Folder…** and **LUTs Folder…** in
+the menu open them. `open -a MetalShade preset.ini` imports too.
+
+A dropped preset applies immediately, and duplicate names are kept rather than
+overwritten (`Preset 2.ini`).
+
+What actually carries over from a ReShade preset is narrow — sharpening,
+brightness, contrast, saturation, temperature — and everything else is reported
+as skipped. An overlay has no depth buffer, so AO, DOF, and depth fog cannot
+work here regardless of what the preset asks for.
 
 The default global shortcuts, supplied by the MIT-licensed
 `KeyboardShortcuts` Swift package, do not require Accessibility permission:
@@ -30,6 +86,8 @@ The default global shortcuts, supplied by the MIT-licensed
   pass-through when off, which avoids black output from some full-screen games)
 - Command-Option-Right — switch between sharpening and LUT grading
 - Command-Option-Up / Down — adjust effect intensity
+- Command-Option-Q — quit MetalShade from anywhere. The overlay draws above the
+  menu bar, so this is the reliable way out if it is ever mispositioned.
 
 ### Effects and assets
 
@@ -38,7 +96,7 @@ Exactly two effect shaders are included:
 1. CAS-style adaptive sharpening.
 2. Standard 3D `.cube` LUT colour grading.
 
-Choose **Load .cube LUT…** from the status menu to load a LUT; an
+Drop a LUT on the control panel to load it; an
 [identity example](Examples/Identity.cube) is included. Shader source is
 created on first run at:
 
@@ -49,10 +107,17 @@ created on first run at:
 Save edits to this file to hot-reload both Metal pipelines. Compilation errors
 leave the last valid pipeline active and are written to Console.
 
-**Import ReShade preset…** accepts `.ini` files, applies only sharpening plus
-brightness, contrast, saturation, and temperature, and logs every unsupported
-setting. It specifically warns when skipping depth-dependent effects such as
-AO, DOF, or depth fog.
+
+## Screenshots
+
+**None yet.** MetalShade has not been validated against a running game, so
+there is nothing honest to show. Before/after images will be added once real
+captures exist; they will be two frames of the same scene from the actual game,
+one with effects bypassed and one processed — not mock-ups and not an image
+editor imitating the shader.
+
+`./scripts/capture-screenshots.sh <cas|lut>` handles the timing and file naming
+when that capture happens.
 
 ## Current scope and limitations
 
@@ -67,9 +132,6 @@ AO, DOF, or depth fog.
   supported in that mode.
 - MetalShade will contain no telemetry and no network calls, aside from an
   optional future GitHub Releases update check.
-- Once effects exist, the README will include a before/after screenshot for
-  every effect. They are intentionally not fabricated here: capture validation
-  against the real game is still required before screenshots can be published.
 - ScreenCaptureKit requires Screen Recording permission. Protected content,
   unusual full-screen window behaviour, HDR tone mapping, and window movement
   across displays still require per-game validation.
@@ -85,6 +147,13 @@ shortcut:
 
 See [DIAGNOSTIC.md](DIAGNOSTIC.md) for interpretation and the recorded
 Cyberpunk 2077 Steam result.
+
+## Releasing
+
+[docs/RELEASE.md](docs/RELEASE.md) is the checklist: validation against the
+real game, screenshot capture, signing, notarization, and publication.
+`./scripts/package-release.sh` performs the packaging steps. Changes are
+recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

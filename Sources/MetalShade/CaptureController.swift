@@ -10,6 +10,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private var targetWindowID: CGWindowID?
     private var overlay: OverlayWindow?
     private var trackingTimer: Timer?
+    private var receivedFrame = false
 
     init(bundleID: String, renderer: MetalRenderer, report: @escaping (String) -> Void) {
         self.bundleID = bundleID
@@ -37,7 +38,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             }
 
             targetWindowID = window.windowID
-            let overlay = try await MainActor.run { try OverlayWindow(renderer: self.renderer, frame: window.frame) }
+            let overlay = try await MainActor.run { try OverlayWindow(renderer: self.renderer, captureFrame: window.frame) }
             self.overlay = overlay
 
             let configuration = SCStreamConfiguration()
@@ -53,19 +54,24 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "io.metalshade.capture", qos: .userInteractive))
             self.stream = stream
             try await stream.startCapture()
-            await MainActor.run { overlay.orderFrontRegardless() }
+            await MainActor.run {
+                // Reveal only once a frame has been drawn; an overlay shown before
+                // that covers the target in black.
+                self.renderer.onFirstFrame = { [weak self] in
+                    guard let self else { return }
+                    self.overlay?.showOnFirstFrame()
+                    self.report("Capturing \(self.bundleID) — \(self.renderer.effectDescription)")
+                }
+            }
             beginTrackingWindow()
-            report("Capturing \(bundleID) — \(renderer.effectDescription)")
+            scheduleNoFrameCheck()
+            report("Waiting for frames from \(bundleID)…")
         } catch { report("Capture failed: \(error.localizedDescription)") }
-    }
-
-    func toggleOverlay() {
-        renderer.toggleEffects()
-        report(renderer.effectDescription)
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        receivedFrame = true
         renderer.submit(pixelBuffer: pixelBuffer)
     }
 
@@ -82,6 +88,15 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let targetWindowID else { return }
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
               let window = content.windows.first(where: { $0.windowID == targetWindowID }) else { return }
-        await MainActor.run { self.overlay?.setFrame(window.frame, display: true) }
+        await MainActor.run { self.overlay?.update(captureFrame: window.frame) }
+    }
+
+    /// Silence here almost always means the Screen Recording grant is missing or
+    /// stale, which `startCapture()` itself reports as success.
+    private func scheduleNoFrameCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, !self.receivedFrame else { return }
+            self.report("No frames after 3s — check Screen Recording for MetalShade in System Settings, then relaunch.")
+        }
     }
 }
