@@ -9,15 +9,32 @@ now a menu-bar-only macOS app that captures one visible game window using
 ScreenCaptureKit, processes the captured texture with Metal, and places a
 click-through overlay above that window.
 
-## Run the overlay
+## Install
 
-Prerequisites: macOS 14+, Apple Silicon, Xcode command-line tools, and a
-running target game.
+Requirements: macOS 14+ and Apple Silicon.
+
+No release has been published yet. Until one is, build from source — see
+[Build and run](#build-and-run). Released builds will be notarized `.zip`
+archives with a published SHA-256 checksum; verify one before opening it:
+
+```bash
+shasum -a 256 -c MetalShade-<version>.zip.sha256
+```
+
+## Build and run
+
+Additional requirement: Xcode command-line tools, plus a running target game.
 
 ```bash
 ./scripts/build-app.sh
 open ./dist/MetalShade.app --args --bundle com.cdprojektred.cyberpunk.steam
 ```
+
+`build-app.sh` produces an **ad-hoc signed** bundle. macOS keys the Screen
+Recording grant to the code signature as well as the bundle identifier, and an
+ad-hoc signature changes on every rebuild, so a locally built MetalShade has to
+be re-approved in System Settings after each build. Pass
+`--sign "Developer ID Application: …"` to sign with a stable identity instead.
 
 On first run, grant **Screen Recording** permission to MetalShade, then quit
 and relaunch it. The app captures the first visible window owned by the bundle
@@ -54,6 +71,17 @@ brightness, contrast, saturation, and temperature, and logs every unsupported
 setting. It specifically warns when skipping depth-dependent effects such as
 AO, DOF, or depth fog.
 
+## Screenshots
+
+**None yet.** MetalShade has not been validated against a running game, so
+there is nothing honest to show. Before/after images will be added once real
+captures exist; they will be two frames of the same scene from the actual game,
+one with effects bypassed and one processed — not mock-ups and not an image
+editor imitating the shader.
+
+`./scripts/capture-screenshots.sh <cas|lut>` handles the timing and file naming
+when that capture happens.
+
 ## Current scope and limitations
 
 - v1 will target macOS 14+ and Apple Silicon only. This keeps the capture and
@@ -67,9 +95,6 @@ AO, DOF, or depth fog.
   supported in that mode.
 - MetalShade will contain no telemetry and no network calls, aside from an
   optional future GitHub Releases update check.
-- Once effects exist, the README will include a before/after screenshot for
-  every effect. They are intentionally not fabricated here: capture validation
-  against the real game is still required before screenshots can be published.
 - ScreenCaptureKit requires Screen Recording permission. Protected content,
   unusual full-screen window behaviour, HDR tone mapping, and window movement
   across displays still require per-game validation.
@@ -85,6 +110,13 @@ shortcut:
 
 See [DIAGNOSTIC.md](DIAGNOSTIC.md) for interpretation and the recorded
 Cyberpunk 2077 Steam result.
+
+## Releasing
+
+[docs/RELEASE.md](docs/RELEASE.md) is the checklist: validation against the
+real game, screenshot capture, signing, notarization, and publication.
+`./scripts/package-release.sh` performs the packaging steps. Changes are
+recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

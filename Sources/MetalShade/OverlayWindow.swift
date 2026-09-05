@@ -3,8 +3,6 @@ import MetalKit
 
 @MainActor
 final class OverlayWindow: NSPanel {
-    private var shown = true
-
     init(renderer: MetalRenderer, frame: CGRect) throws {
         super.init(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
         isOpaque = false
@@ -27,8 +25,7 @@ final class OverlayWindow: NSPanel {
         contentView = view
     }
 
-    func toggleVisibility() {
-        shown.toggle()
-        shown ? orderFrontRegardless() : orderOut(nil)
-    }
+    // Deliberately no hide/show control: some full-screen Metal games present a
+    // black surface when the overlay is ordered out. Bypassing effects switches
+    // MetalRenderer to a neutral shader instead of removing this window.
 }
