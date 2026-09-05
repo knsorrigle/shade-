@@ -21,11 +21,13 @@ final class MetalRenderer {
     private var lutPipeline: MTLRenderPipelineState?
     private var lutTexture: MTLTexture?
     private var effect: Effect = .cas
+    private var effectsEnabled = true
     private var uniforms = EffectUniforms()
     private let renderLock = NSLock()
     private var frameInFlight = false
 
     var effectDescription: String {
+        guard effectsEnabled else { return "effects bypassed" }
         let title = effect == .cas ? "CAS sharpening" : "3D LUT grading"
         return "\(title), \(Int(uniforms.intensity * 100))%"
     }
@@ -48,6 +50,7 @@ final class MetalRenderer {
 
     func attach(view: MTKView) { self.view = view }
     func cycleEffect() { effect = effect == .cas ? .lut : .cas }
+    func toggleEffects() { effectsEnabled.toggle() }
     func adjustIntensity(by delta: Float) { uniforms.intensity = min(max(uniforms.intensity + delta, 0), 1) }
     func apply(_ settings: PresetSettings) {
         if let sharpening = settings.sharpening { uniforms.intensity = sharpening; effect = .cas }
@@ -83,12 +86,20 @@ final class MetalRenderer {
         var cvTexture: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, pixelBuffer, nil, .bgra8Unorm, CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), 0, &cvTexture)
         guard let cvTexture, let input = CVMetalTextureGetTexture(cvTexture), let commandBuffer = commandQueue.makeCommandBuffer(), let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
-        let pipeline = effect == .lut && lutTexture != nil ? lutPipeline : casPipeline
+        let selectedEffect: Effect = effectsEnabled ? effect : .cas
+        let pipeline = selectedEffect == .lut && lutTexture != nil ? lutPipeline : casPipeline
         guard let pipeline else { return }
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(input, index: 0)
-        if effect == .lut, let lutTexture { encoder.setFragmentTexture(lutTexture, index: 1) }
+        if selectedEffect == .lut, let lutTexture { encoder.setFragmentTexture(lutTexture, index: 1) }
         var localUniforms = uniforms
+        if !effectsEnabled {
+            // Do not hide the overlay: some full-screen Metal games present a black
+            // backing surface when it is removed. A neutral shader is visually off
+            // while preserving the working capture/compositing path.
+            localUniforms.intensity = 0
+            localUniforms.colorAdjust = SIMD4<Float>(0, 1, 1, 0)
+        }
         encoder.setFragmentBytes(&localUniforms, length: MemoryLayout<EffectUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()

@@ -26,7 +26,8 @@ identifier. Its menu-bar icon is `MS`; it never appears in the Dock.
 The default global shortcuts, supplied by the MIT-licensed
 `KeyboardShortcuts` Swift package, do not require Accessibility permission:
 
-- Command-Option-O — toggle the overlay
+- Command-Option-O — toggle effects (the capture overlay remains as a neutral
+  pass-through when off, which avoids black output from some full-screen games)
 - Command-Option-Right — switch between sharpening and LUT grading
 - Command-Option-Up / Down — adjust effect intensity
 

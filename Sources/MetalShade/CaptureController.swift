@@ -60,7 +60,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func toggleOverlay() {
-        Task { @MainActor [weak self] in self?.overlay?.toggleVisibility() }
+        renderer.toggleEffects()
+        report(renderer.effectDescription)
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
