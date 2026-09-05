@@ -47,18 +47,24 @@ openssl req -x509 -newkey rsa:2048 -keyout "$work/key.pem" -out "$work/cert.pem"
     -addext "keyUsage=critical,digitalSignature" \
     -addext "extendedKeyUsage=critical,codeSigning" >/dev/null 2>&1
 
+# A non-empty password is required: `security import` rejects a PKCS#12 with an
+# empty one ("MAC verification failed"). The password protects only this
+# temporary file, which is deleted on exit.
+password="metalshade-dev-transient"
 openssl pkcs12 -export -out "$work/dev.p12" -inkey "$work/key.pem" \
-    -in "$work/cert.pem" -passout pass: -name "$name" >/dev/null 2>&1
+    -in "$work/cert.pem" -passout "pass:$password" -name "$name" >/dev/null 2>&1
 
 echo "==> Importing into your login keychain"
 # -T authorises codesign to use the key without prompting on every build.
-security import "$work/dev.p12" -k "$keychain" -P "" -T /usr/bin/codesign
+security import "$work/dev.p12" -k "$keychain" -P "$password" -T /usr/bin/codesign
 
 echo "==> Trusting it for code signing (login keychain only)"
 # May prompt for confirmation. Failure here is not fatal; the identity can still
 # work, so the check below is what decides.
+# Without this the certificate imports but is not a *valid* code-signing
+# identity, and `codesign` reports "no identity found".
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$work/cert.pem" \
-    2>/dev/null || echo "    (trust step declined or unavailable — continuing)"
+    || echo "    (trust step declined — the identity will not be usable)"
 
 echo
 if security find-identity -v -p codesigning | grep -q "$name"; then
