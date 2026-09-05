@@ -8,6 +8,10 @@ minor version may carry breaking changes.
 
 ### Added
 
+- The capture target is chosen in the window. The panel lists games found in the
+  Steam library with their architecture and injection verdict, and accepts a
+  bundle identifier for anything else. Capture can be started, switched, and
+  stopped without relaunching.
 - Control panel window (**Control Panel…** in the menu-bar menu): effect
   selection, intensity, and the brightness/contrast/saturation/temperature
   sliders, which previously had no interface and could only be set by importing

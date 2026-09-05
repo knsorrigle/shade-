@@ -23,6 +23,8 @@ struct ControlPanelView: View {
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.10)))
                 }
                 Divider()
+                targetSection
+                Divider()
                 effectSection
                 Divider()
                 colorSection
@@ -43,6 +45,71 @@ struct ControlPanelView: View {
             Text("MetalShade").font(.title2.weight(.semibold))
             Text(model.status)
                 .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var targetSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Target").font(.headline)
+                Spacer()
+                if model.isScanningGames {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Rescan", action: model.scanForGames).buttonStyle(.link).font(.caption)
+                }
+            }
+
+            if let active = model.activeTarget {
+                HStack(spacing: 8) {
+                    Image(systemName: "record.circle").foregroundStyle(.red)
+                    Text(active).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Stop", action: model.stopCapture).buttonStyle(.borderless).font(.caption)
+                }
+            }
+
+            if model.detectedGames.isEmpty {
+                Text(model.isScanningGames ? "Scanning…" : "No games detected in your Steam library.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.detectedGames) { game in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Text(game.name).lineLimit(1)
+                            Spacer()
+                            Button(model.activeTarget == game.bundleID ? "Restart" : "Use") {
+                                model.startCapture(bundleID: game.bundleID)
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                        }
+                        Text("\(game.architecture) · \(game.injection.summary)")
+                            .font(.caption2)
+                            .foregroundStyle(game.injection.isOpen ? .secondary : .secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
+            Divider().padding(.vertical, 2)
+
+            Text("Any app, by bundle identifier")
+                .font(.subheadline.weight(.medium))
+            HStack(spacing: 8) {
+                TextField("com.apple.Preview", text: $model.manualBundleID)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { model.startCapture(bundleID: model.manualBundleID) }
+                Button("Start") { model.startCapture(bundleID: model.manualBundleID) }
+                    .disabled(model.manualBundleID.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            Text("Useful for testing without a game — try com.apple.Preview with a photo open.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

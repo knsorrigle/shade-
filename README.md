@@ -57,8 +57,15 @@ Additional requirement: Xcode command-line tools, plus a running target game.
 
 ```bash
 ./scripts/build-app.sh
-open ./dist/MetalShade.app --args --bundle com.cdprojektred.cyberpunk.steam
+open -n ./dist/MetalShade.app
 ```
+
+No launch flags are needed. The control panel lists the games it finds and takes
+a bundle identifier for anything else; pick a target there and capture starts.
+
+Use `open -n`, not plain `open`. When an instance is already running, `open`
+activates that one instead of starting a new process, which is why passing a
+target on the command line was unreliable.
 
 `build-app.sh` produces an **ad-hoc signed** bundle. macOS keys the Screen
 Recording grant to the code signature as well as the bundle identifier, and an

@@ -77,6 +77,21 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) { report("Capture stopped: \(error.localizedDescription)") }
 
+    /// Tears the session down so another target can be selected without
+    /// relaunching the app.
+    func stop() {
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        let stream = self.stream
+        self.stream = nil
+        Task { try? await stream?.stopCapture() }
+        Task { @MainActor in
+            self.overlay?.orderOut(nil)
+            self.overlay = nil
+        }
+        renderer.onFirstFrame = nil
+    }
+
     private func beginTrackingWindow() {
         trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }

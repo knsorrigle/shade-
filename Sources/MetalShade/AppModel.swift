@@ -33,6 +33,15 @@ final class AppModel: ObservableObject {
     }
 
     @Published var renderMode: RenderMode = .idle
+    /// Games found on this machine, plus whatever the user types in by hand.
+    @Published private(set) var detectedGames: [GameLibrary.Game] = []
+    @Published private(set) var isScanningGames = false
+    @Published var manualBundleID = ""
+    @Published private(set) var activeTarget: String?
+
+    /// Set by AppDelegate; starting and stopping capture is its job.
+    var onStartCapture: ((String) -> Void)?
+    var onStopCapture: (() -> Void)?
     @Published var status = "starting…"
     @Published var effectsEnabled = true { didSet { renderer?.setEffectsEnabled(effectsEnabled); refreshStatus() } }
     @Published var effect: MetalRenderer.Effect = .cas { didSet { renderer?.setEffect(effect); refreshStatus() } }
@@ -66,6 +75,35 @@ final class AppModel: ObservableObject {
     func adjustIntensity(by delta: Float) { intensity = min(max(intensity + delta, 0), 1) }
 
     func resetColor() { color = BasicColor() }
+
+    // MARK: - Targets
+
+    func scanForGames() {
+        isScanningGames = true
+        // codesign runs as a subprocess per game; keep it off the main queue.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let games = GameLibrary.scan()
+            DispatchQueue.main.async {
+                self.detectedGames = games
+                self.isScanningGames = false
+            }
+        }
+    }
+
+    func startCapture(bundleID: String) {
+        let trimmed = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        activeTarget = trimmed
+        renderMode = .capturing
+        onStartCapture?(trimmed)
+    }
+
+    func stopCapture() {
+        activeTarget = nil
+        renderMode = .idle
+        onStopCapture?()
+        status = "Stopped. Pick a target to start again."
+    }
 
     // MARK: - Library
 
