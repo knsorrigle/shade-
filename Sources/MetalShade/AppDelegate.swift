@@ -54,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 calibration = CalibrationSession(bundleID: bundleID) { [weak self] message in
                     self?.model.report(message)
                 }
+                // Show the panel: a menu-bar-only app that reports a problem into a
+                // dropdown nobody opens is indistinguishable from one that failed
+                // to launch.
+                controlPanel.show()
                 calibration?.start()
                 return
             }
