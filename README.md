@@ -1,13 +1,43 @@
 # MetalShade
 
-MetalShade is a prospective, open-source macOS post-processing tool for native
-Metal games. The first intended test target is Cyberpunk 2077's native Mac
-build.
+MetalShade is an open-source macOS post-processing tool for native Metal games.
+It detects installed games, works out which techniques each one actually
+permits, and applies effects by whichever route that game allows.
 
-The Cyberpunk 2077 Steam diagnostic selected the overlay path. MetalShade is
-now a menu-bar-only macOS app that captures one visible game window using
-ScreenCaptureKit, processes the captured texture with Metal, and places a
-click-through overlay above that window.
+It is a menu-bar-only app. Today it captures a game window with
+ScreenCaptureKit, processes the texture with Metal, and draws a click-through
+overlay above the window.
+
+## Methods
+
+Different games permit different things, and MetalShade reports which, per
+game, rather than assuming. Only the first of these is implemented:
+
+| Method | How it works | Depth-based effects | Status |
+|---|---|---|---|
+| **Overlay** | ScreenCaptureKit captures the window; Metal processes it; a click-through window draws the result | No — the depth buffer is gone before capture | **Implemented** |
+| **Injection** | `DYLD_INSERT_LIBRARIES` loads a dylib that hooks the game's Metal command stream | Possible in principle — needs the game's depth textures identified | Not implemented; viability is detected per game |
+| **Estimated depth** | A monocular depth model over the captured frame synthesises an approximate depth buffer | Approximate; soft and temporally unstable | Not implemented |
+
+Whether injection is possible is a property of the game's code signature, and
+it varies. On one machine's Steam library:
+
+```text
+Cyberpunk 2077            arm64             injection possible — library validation disabled
+Rise of the Tomb Raider   x86_64 (Rosetta)  injection possible — executable is unsigned
+```
+
+Run the diagnostic yourself with [`scripts/check-target.sh`](scripts/check-target.sh);
+see [DIAGNOSTIC.md](DIAGNOSTIC.md) for how to read it. **Re-run it after any
+game update, and never trust a verdict taken from a bundle that may still be
+downloading** — that produces a false negative, as recorded in that file.
+
+## Scope: single-player only
+
+Do not point MetalShade at a multiplayer game. Injecting code into a process,
+and in some cases overlaying it, is what anti-cheat systems exist to detect,
+and the consequence falls on the player's account rather than on this project.
+The intended targets are single-player titles.
 
 ## Install
 
