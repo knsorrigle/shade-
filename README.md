@@ -86,6 +86,8 @@ The default global shortcuts, supplied by the MIT-licensed
   pass-through when off, which avoids black output from some full-screen games)
 - Command-Option-Right — switch between sharpening and LUT grading
 - Command-Option-Up / Down — adjust effect intensity
+- Command-Option-Q — quit MetalShade from anywhere. The overlay draws above the
+  menu bar, so this is the reliable way out if it is ever mispositioned.
 
 ### Effects and assets
 

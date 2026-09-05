@@ -20,6 +20,8 @@ minor version may carry breaking changes.
 - Preset import warnings are shown in the window. They previously went only to
   `NSLog`, so a preset whose settings were nearly all unsupported appeared to
   apply cleanly.
+- Command-Option-Q quits MetalShade from anywhere. The overlay sits above the
+  menu bar, so a misplaced one can leave nothing clickable.
 
 ### Changed
 
@@ -29,6 +31,20 @@ minor version may carry breaking changes.
 
 ### Fixed
 
+- The overlay was placed in the wrong coordinate space. `SCWindow.frame` is
+  CoreGraphics display space (origin top-left, y downward) and was passed
+  straight to `NSWindow`, which uses AppKit screen space (origin bottom-left, y
+  upward). The overlay therefore appeared mirrored about the screen's centre
+  line; for a window low on screen it landed on the menu bar, and because the
+  overlay sits at `.screenSaver` level it covered the menu bar and left nothing
+  clickable. Present since the overlay MVP.
+- An `MTKView` that has not drawn yet is opaque black, so a capture that
+  produced no frames — the symptom of a missing Screen Recording grant —
+  covered the target window in solid black. The layer is now non-opaque and the
+  overlay is not shown until a frame has actually rendered.
+- `startCapture()` reports success even when no frames follow. A check now
+  reports the likely cause after three seconds of silence.
+- The overlay could take key focus; it is now a `.nonactivatingPanel`.
 - `scripts/build-app.sh` never copied the `KeyboardShortcuts` resource bundle
   into the app. `.build/release` is a symlink and `find` does not descend
   through it, so the `-exec cp` never matched. Every bundle built before this

@@ -7,6 +7,9 @@ extension KeyboardShortcuts.Name {
     static let cycleEffect = Self("cycleEffect", initial: .init(.rightArrow, modifiers: [.command, .option]))
     static let increaseIntensity = Self("increaseIntensity", initial: .init(.upArrow, modifiers: [.command, .option]))
     static let decreaseIntensity = Self("decreaseIntensity", initial: .init(.downArrow, modifiers: [.command, .option]))
+    /// Escape hatch. The overlay sits above the menu bar, so a misplaced one can
+    /// leave nothing clickable; this always kills it.
+    static let quitApp = Self("quitApp", initial: .init(.q, modifiers: [.command, .option]))
 }
 
 @MainActor
@@ -80,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Presets Folder…", action: #selector(revealPresets), keyEquivalent: "")
         menu.addItem(withTitle: "LUTs Folder…", action: #selector(revealLUTs), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit MetalShade", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: "Quit MetalShade (⌘⌥Q)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
     }
 
@@ -97,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardShortcuts.onKeyUp(for: .cycleEffect) { [weak self] in self?.model.cycleEffect() }
         KeyboardShortcuts.onKeyUp(for: .increaseIntensity) { [weak self] in self?.model.adjustIntensity(by: 0.05) }
         KeyboardShortcuts.onKeyUp(for: .decreaseIntensity) { [weak self] in self?.model.adjustIntensity(by: -0.05) }
+        KeyboardShortcuts.onKeyUp(for: .quitApp) { NSApp.terminate(nil) }
     }
 
     private func importLaunchAssets() {

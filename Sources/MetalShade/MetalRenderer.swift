@@ -29,6 +29,9 @@ final class MetalRenderer {
     private var uniforms = EffectUniforms()
     private let renderLock = NSLock()
     private var frameInFlight = false
+    private var hasRenderedFrame = false
+    /// Called on the main queue after the first frame actually reaches the screen.
+    var onFirstFrame: (() -> Void)?
 
     var effectDescription: String {
         guard effectsEnabled else { return "effects bypassed" }
@@ -122,6 +125,10 @@ final class MetalRenderer {
         }
         submitted = true
         commandBuffer.commit()
+        if !hasRenderedFrame {
+            hasRenderedFrame = true
+            onFirstFrame?()
+        }
     }
 
     private func finishFrame() {
