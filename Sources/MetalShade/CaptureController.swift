@@ -14,6 +14,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private var frameCount = 0
     private var rateTimer: Timer?
     private let countLock = NSLock()
+    /// One prompt per launch, however many targets are tried.
+    private static var hasRequestedAccess = false
 
     init(bundleID: String, renderer: MetalRenderer, report: @escaping (String) -> Void) {
         self.bundleID = bundleID
@@ -25,8 +27,17 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         Diagnostics.log("start requested for \(bundleID)")
         guard CGPreflightScreenCaptureAccess() else {
             Diagnostics.log("screen recording permission missing")
-            report("Screen Recording permission required; approve it, then relaunch MetalShade")
-            CGRequestScreenCaptureAccess()
+            // Ask at most once per launch. Requesting again on every attempt
+            // produced a prompt each time a target was picked, which reads as
+            // the permission never sticking.
+            if !CaptureController.hasRequestedAccess {
+                CaptureController.hasRequestedAccess = true
+                CGRequestScreenCaptureAccess()
+            }
+            report("Screen Recording is not granted. Approve MetalShade in "
+                + "System Settings › Privacy & Security › Screen Recording, then quit "
+                + "and reopen MetalShade. Approving does not affect a process that is "
+                + "already running.")
             return
         }
         Task { [weak self] in await self?.startCapture() }
