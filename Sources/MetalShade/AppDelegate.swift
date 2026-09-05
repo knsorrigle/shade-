@@ -54,6 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 calibration = CalibrationSession(bundleID: bundleID) { [weak self] message in
                     self?.model.report(message)
                 }
+                // Show the panel: a menu-bar-only app that reports a problem into a
+                // dropdown nobody opens is indistinguishable from one that failed
+                // to launch.
+                model.renderMode = .selfTest
+                controlPanel.show()
                 calibration?.start()
                 return
             }
@@ -62,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.model.report(message) }
             }
             self.capture = capture
+            model.renderMode = .capturing
             capture.start()
         } catch {
             model.report("Metal unavailable: \(error.localizedDescription)")

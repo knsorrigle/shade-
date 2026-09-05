@@ -18,8 +18,20 @@ final class CalibrationSession {
     }
 
     func start() {
+        // Poll rather than give up: launching MetalShade before its target is the
+        // normal order of events, and failing silently here left nothing on
+        // screen at all.
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        tick()
+    }
+
+    private func tick() {
+        guard overlay == nil else { return follow() }
         guard let target = WindowFinder.firstWindow(ofBundleID: bundleID) else {
-            report("Self-test: no visible window for \(bundleID). Launch it first.")
+            report("Self-test: waiting for a window from \(bundleID) — open it and the "
+                + "calibration overlay appears automatically.")
             return
         }
         windowID = target.windowID
@@ -27,10 +39,6 @@ final class CalibrationSession {
         report("Self-test: overlay on window \(target.windowID) at "
             + "\(Int(target.frame.width))x\(Int(target.frame.height)). "
             + "Its green border should sit exactly on the window's edges.")
-
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.follow() }
-        }
     }
 
     private func follow() {
