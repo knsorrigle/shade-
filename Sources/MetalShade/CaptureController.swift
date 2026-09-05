@@ -157,8 +157,11 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             let count = self.frameCount
             self.frameCount = 0
             self.countLock.unlock()
-            guard self.receivedFrame else { return }
+            // Log every tick, including zeroes. Silence is ambiguous: it cannot
+            // distinguish a stream that never delivers from one that delivers
+            // only while the game's Space is in front.
             Diagnostics.log("\(count) fps")
+            guard self.receivedFrame else { return }
             self.report("Capturing \(self.bundleID) — \(count) fps, \(self.renderer.effectDescription)")
         }
     }
