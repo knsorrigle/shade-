@@ -128,6 +128,12 @@ struct ControlPanelView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             effectControls
+
+            Toggle("Diagnostic tint", isOn: $model.diagnosticTint)
+            Text("Paints the overlay magenta. If the game does not turn magenta, the overlay is not reaching the screen — which no subtle effect can tell you. Works with effects off too.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -147,6 +153,7 @@ struct ControlPanelView: View {
             }
 
             LabeledSlider(title: "Intensity", value: $model.intensity, range: 0...1, format: .percent)
+
         }
         .disabled(!model.effectsEnabled)
         .opacityWhenDisabled(model.effectsEnabled)

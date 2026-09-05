@@ -8,6 +8,8 @@ struct EffectUniforms {
     var domainMin = SIMD4<Float>(0, 0, 0, 0)
     var domainMax = SIMD4<Float>(1, 1, 1, 0)
     var colorAdjust = SIMD4<Float>(0, 1, 1, 0)
+    /// x: tint strength, yzw: tint colour. Diagnostic only.
+    var debug = SIMD4<Float>(0, 0, 1, 0)
 }
 
 final class MetalRenderer {
@@ -61,6 +63,10 @@ final class MetalRenderer {
     func setEffect(_ newEffect: Effect) { effect = newEffect }
     func setEffectsEnabled(_ enabled: Bool) { effectsEnabled = enabled }
     func setIntensity(_ value: Float) { uniforms.intensity = min(max(value, 0), 1) }
+    func setDiagnosticTint(_ enabled: Bool) {
+        uniforms.debug = enabled ? SIMD4(0.75, 0, 1, 0) : SIMD4(0, 0, 1, 0)
+    }
+
     func setColor(_ color: BasicColor) {
         uniforms.colorAdjust = [color.brightness, color.contrast, color.saturation, color.temperature]
     }
@@ -114,6 +120,9 @@ final class MetalRenderer {
             // while preserving the working capture/compositing path.
             localUniforms.intensity = 0
             localUniforms.colorAdjust = SIMD4<Float>(0, 1, 1, 0)
+            // Keep the diagnostic tint: it answers "is the overlay on screen",
+            // which is exactly the question being asked when effects are off.
+            localUniforms.debug = uniforms.debug
         }
         encoder.setFragmentBytes(&localUniforms, length: MemoryLayout<EffectUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
