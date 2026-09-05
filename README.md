@@ -74,10 +74,22 @@ the menu open them. `open -a MetalShade preset.ini` imports too.
 A dropped preset applies immediately, and duplicate names are kept rather than
 overwritten (`Preset 2.ini`).
 
-What actually carries over from a ReShade preset is narrow — sharpening,
-brightness, contrast, saturation, temperature — and everything else is reported
-as skipped. An overlay has no depth buffer, so AO, DOF, and depth fog cannot
-work here regardless of what the preset asks for.
+What carries over from a ReShade preset is narrow. The importer reads keys only
+from effects it recognises — `CAS`, `LumaSharpen`, `AdaptiveSharpen`,
+`qUINT_lightroom`, `Vibrance`, `Colourfulness`, `Tonemap` — and maps them onto
+sharpening, brightness, contrast, saturation, and temperature.
+
+It refuses to guess at the rest, because ReShade key names are scoped to their
+effect: `Saturation` inside `FilmicPass.fx` is an offset within a tone curve,
+not a global saturation multiplier. Everything else is reported, grouped by the
+effect it came from, with the reason. Depth-based effects — AO, DOF, GI, depth
+fog — can never work here, whatever the preset asks for.
+
+To see what a preset would do before importing it:
+
+```bash
+./scripts/check-preset.sh "~/Downloads/Some Preset.ini"
+```
 
 The default global shortcuts, supplied by the MIT-licensed
 `KeyboardShortcuts` Swift package, do not require Accessibility permission:
@@ -118,6 +130,31 @@ editor imitating the shader.
 
 `./scripts/capture-screenshots.sh <cas|lut>` handles the timing and file naming
 when that capture happens.
+
+## Verifying the overlay
+
+Overlay geometry can be checked without granting Screen Recording, which keeps
+alignment problems separate from capture problems:
+
+```bash
+open -n ./dist/MetalShade.app --args --bundle com.apple.TextEdit --self-test
+./scripts/validate-overlay.sh com.apple.TextEdit
+```
+
+Self-test positions the overlay over the target and draws a green border and
+crosshair instead of captured frames. The validator compares the two windows
+through `CGWindowList` and reports the delta:
+
+```text
+target   com.apple.TextEdit
+         182,88 656x422
+overlay  182,88 656x422
+delta    x +0  y +0  w +0  h +0
+order    overlay is in front of the target  PASS
+```
+
+Move and resize the target window and run the validator again; the delta should
+stay at zero.
 
 ## Current scope and limitations
 

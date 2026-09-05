@@ -92,16 +92,37 @@ final class AppModel: ObservableObject {
             }
             color = report.settings.color
             activePreset = item
+
+            guard !report.applied.isEmpty else {
+                importNotes.append(.init(
+                    level: .failure,
+                    text: "\(item.name): nothing in this preset can be reproduced by an overlay."))
+                importNotes.append(contentsOf: skippedNotes(report))
+                refreshStatus()
+                return
+            }
+
             importNotes.append(.init(
-                level: report.warnings.isEmpty ? .success : .warning,
-                text: report.warnings.isEmpty
-                    ? "Applied \(item.name)."
-                    : "Applied \(item.name) — \(report.warnings.count) setting(s) could not be used."))
-            importNotes.append(contentsOf: report.warnings.map { .init(level: .warning, text: $0) })
+                level: .success,
+                text: "Applied \(item.name) — \(report.applied.count) setting(s) used, "
+                    + "\(report.skippedCount) skipped."))
+            importNotes.append(contentsOf: report.applied.map {
+                .init(level: .success, text: "\($0.label) → \($0.detail)")
+            })
+            importNotes.append(contentsOf: skippedNotes(report))
         } catch {
             importNotes.append(.init(level: .failure, text: "\(item.name): \(error.localizedDescription)"))
         }
         refreshStatus()
+    }
+
+    /// One line per effect rather than one per setting. A real preset carries a
+    /// few hundred keys, and listing them individually buries the handful that
+    /// actually took effect.
+    private func skippedNotes(_ report: PresetImportReport) -> [ImportNote] {
+        report.skipped.map {
+            .init(level: .warning, text: "\($0.effect): \($0.count) skipped — \($0.reason)")
+        }
     }
 
     func activate(lut item: PresetLibrary.Item, appendNotes: Bool = false) {

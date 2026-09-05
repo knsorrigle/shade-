@@ -17,6 +17,17 @@ minor version may carry breaking changes.
   Dropping files into those folders in Finder works identically, and removing
   one there removes it from the app. `open -a MetalShade preset.ini` imports as
   well.
+- `--self-test` positions the overlay over a target window and draws a
+  calibration border instead of captured frames, using `CGWindowList` only. It
+  needs no Screen Recording grant, so overlay geometry can be verified
+  separately from capture — the two previously failed together.
+- `scripts/validate-overlay.sh` measures the overlay against its target window
+  and reports the delta and stacking order, turning alignment into a
+  measurement rather than an impression.
+- `scripts/check-preset.sh` reports what MetalShade would take from a preset
+  without launching the app, compiled against the app's own parser.
+- Preset import results are grouped by effect. A real preset carries a few
+  hundred keys, and one warning per key buried the handful that took effect.
 - Preset import warnings are shown in the window. They previously went only to
   `NSLog`, so a preset whose settings were nearly all unsupported appeared to
   apply cleanly.
@@ -31,6 +42,13 @@ minor version may carry breaking changes.
 
 ### Fixed
 
+- ReShade preset import read keys without regard to the effect they belong to.
+  ReShade key names are scoped to their effect and mean different things in
+  each, so `Saturation=-0.15` inside `FilmicPass.fx` — an offset within a
+  filmic tone curve — was read as a global saturation multiplier, clamped to 0,
+  and turned the whole image greyscale. `Contrast=0.0` inside `CAS.fx` (its
+  contrast-adaptation term) was one section-ordering away from doing the same.
+  The parser is now section-aware and reads keys only from effects it knows.
 - The overlay was placed in the wrong coordinate space. `SCWindow.frame` is
   CoreGraphics display space (origin top-left, y downward) and was passed
   straight to `NSWindow`, which uses AppKit screen space (origin bottom-left, y
