@@ -44,8 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             installHotkeys()
             importLaunchAssets()
 
+            model.onStartCapture = { [weak self] bundleID in self?.beginCapture(bundleID) }
+            model.onStopCapture = { [weak self] in self?.endCapture() }
+            model.scanForGames()
+
             guard let bundleID = options.bundleID else {
-                model.report("Start with --bundle <bundle-id>")
+                // No target on the command line is the normal case now: pick one in
+                // the window. Requiring a launch flag made the app depend on getting
+                // an `open --args` incantation exactly right, and `open` silently
+                // drops those arguments when an instance is already running.
+                model.report("Pick a target below to start.")
                 controlPanel.show()
                 return
             }
@@ -63,16 +71,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let capture = CaptureController(bundleID: bundleID, renderer: renderer) { [weak self] message in
-                DispatchQueue.main.async { self?.model.report(message) }
-            }
-            self.capture = capture
-            model.renderMode = .capturing
-            capture.start()
+            model.startCapture(bundleID: bundleID)
+            controlPanel.show()
         } catch {
             model.report("Metal unavailable: \(error.localizedDescription)")
             controlPanel.show()
         }
+    }
+
+    private func beginCapture(_ bundleID: String) {
+        guard let renderer else { return }
+        capture?.stop()
+        let controller = CaptureController(bundleID: bundleID, renderer: renderer) { [weak self] message in
+            DispatchQueue.main.async { self?.model.report(message) }
+        }
+        capture = controller
+        controller.start()
+    }
+
+    private func endCapture() {
+        capture?.stop()
+        capture = nil
     }
 
     /// Files opened with MetalShade (`open -a MetalShade preset.ini`) are
