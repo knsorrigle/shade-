@@ -131,6 +131,31 @@ editor imitating the shader.
 `./scripts/capture-screenshots.sh <cas|lut>` handles the timing and file naming
 when that capture happens.
 
+## Verifying the overlay
+
+Overlay geometry can be checked without granting Screen Recording, which keeps
+alignment problems separate from capture problems:
+
+```bash
+open -n ./dist/MetalShade.app --args --bundle com.apple.TextEdit --self-test
+./scripts/validate-overlay.sh com.apple.TextEdit
+```
+
+Self-test positions the overlay over the target and draws a green border and
+crosshair instead of captured frames. The validator compares the two windows
+through `CGWindowList` and reports the delta:
+
+```text
+target   com.apple.TextEdit
+         182,88 656x422
+overlay  182,88 656x422
+delta    x +0  y +0  w +0  h +0
+order    overlay is in front of the target  PASS
+```
+
+Move and resize the target window and run the validator again; the delta should
+stay at zero.
+
 ## Current scope and limitations
 
 - v1 will target macOS 14+ and Apple Silicon only. This keeps the capture and

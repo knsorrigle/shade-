@@ -34,12 +34,31 @@ export METALSHADE_NOTARY_PROFILE="metalshade"
 
 ## 2. Validate against the real game
 
-A release must not be cut from an unvalidated overlay. Confirm, against the
-running game, that:
+A release must not be cut from an unvalidated overlay.
+
+Two checks are automated and need no Screen Recording grant, because they use
+`CGWindowList` rather than capture. Run them first — they isolate overlay
+geometry from whether capture works, which previously failed together and made
+the cause hard to see:
+
+```bash
+open -n ./dist/MetalShade.app --args --bundle <bundle-id> --self-test
+./scripts/validate-overlay.sh <bundle-id>
+```
+
+Self-test draws a green calibration border where the overlay would be. The
+validator reports the delta between overlay and target, and whether the overlay
+is in front. Move and resize the target window, then run the validator again.
+
+- [ ] `validate-overlay.sh` reports PASS with zero delta.
+- [ ] It still reports PASS after moving and resizing the target window.
+
+Then, against the running game, confirm that:
 
 - [ ] MetalShade's menu reports `Capturing <bundle-id>` rather than an error.
-- [ ] The overlay is aligned with the game window and stays aligned when the
-      window moves or the display changes.
+- [ ] `validate-overlay.sh` still passes with capture running, not only in
+      self-test mode.
+- [ ] The overlay stays aligned when the window moves across displays.
 - [ ] The overlay is click-through: input reaches the game, not the overlay.
 - [ ] Sharpening and LUT grading both visibly change the image.
 - [ ] Command-Option-O bypasses effects without producing a black screen.

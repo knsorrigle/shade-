@@ -17,6 +17,13 @@ minor version may carry breaking changes.
   Dropping files into those folders in Finder works identically, and removing
   one there removes it from the app. `open -a MetalShade preset.ini` imports as
   well.
+- `--self-test` positions the overlay over a target window and draws a
+  calibration border instead of captured frames, using `CGWindowList` only. It
+  needs no Screen Recording grant, so overlay geometry can be verified
+  separately from capture — the two previously failed together.
+- `scripts/validate-overlay.sh` measures the overlay against its target window
+  and reports the delta and stacking order, turning alignment into a
+  measurement rather than an impression.
 - `scripts/check-preset.sh` reports what MetalShade would take from a preset
   without launching the app, compiled against the app's own parser.
 - Preset import results are grouped by effect. A real preset carries a few

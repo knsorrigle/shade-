@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let model = AppModel()
     private var controlPanel: ControlPanelWindowController!
     private var options = LaunchOptions(arguments: CommandLine.arguments)
+    private var calibration: CalibrationSession?
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -48,6 +49,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 controlPanel.show()
                 return
             }
+
+            if options.selfTest {
+                calibration = CalibrationSession(bundleID: bundleID) { [weak self] message in
+                    self?.model.report(message)
+                }
+                calibration?.start()
+                return
+            }
+
             let capture = CaptureController(bundleID: bundleID, renderer: renderer) { [weak self] message in
                 DispatchQueue.main.async { self?.model.report(message) }
             }
@@ -122,8 +132,10 @@ private struct LaunchOptions {
     var bundleID: String?
     var lutPath: String?
     var presetPath: String?
+    var selfTest = false
 
     init(arguments: [String]) {
+        selfTest = arguments.contains("--self-test")
         for (index, argument) in arguments.enumerated() where index + 1 < arguments.count {
             switch argument {
             case "--bundle": bundleID = arguments[index + 1]
