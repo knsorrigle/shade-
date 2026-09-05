@@ -95,7 +95,45 @@ library. The entitlements blob is invalid, so macOS ignores it; in particular,
 there is no effective `com.apple.security.cs.disable-library-validation`
 entitlement.
 
-**Verdict: INJECTION BLOCKED — use overlay.** The Steam build's executable has
-the Hardened Runtime (`flags=0x10000(runtime)`) and does not effectively opt
-out of Library Validation. Phase 1 should only be selected after this same
-check is repeated for any other intended distribution channel.
+**Verdict as recorded on 2026-09-05: INJECTION BLOCKED — use overlay.**
+
+## Correction (re-tested 2026-09-06): INJECTION VIABLE
+
+The result above does not reproduce. Re-running the same command against the
+same file now reports the opposite verdict, and the file has not changed —
+`CDHash` is identical (`d4c2a8386653e6ff7346f57a846e2f8a12e5b280`).
+
+What differs is the rest of the signing report:
+
+| | 2026-09-05 | 2026-09-06 |
+|---|---|---|
+| `Authority` | `(unavailable)` | `Developer ID Application: CD PROJEKT S.A. (PL47UP47QQ)` |
+| `Info.plist` | `not bound` | `entries=23` |
+| entitlements blob | `warning: ... invalid ... The OS will ignore these entitlements` | parses cleanly |
+
+An unreadable authority chain, an unbound `Info.plist`, and a malformed
+entitlements blob together indicate the bundle was read while incomplete — a
+Steam download or verification still in progress. The recorded run was a false
+negative caused by inspecting the bundle mid-install.
+
+The executable declares both entitlements that `DYLD_INSERT_LIBRARIES` requires
+on a hardened process:
+
+```text
+com.apple.security.cs.disable-library-validation
+com.apple.security.cs.allow-dyld-environment-variables
+```
+
+Disabling library validation alone is not sufficient; a hardened process
+ignores `DYLD_*` variables without the second entitlement. Both are present,
+and `codesign --verify` reports the signature valid and satisfying its
+designated requirement.
+
+**This means loading a third-party dylib into Cyberpunk 2077 is permitted by
+the signature.** It does not mean a hook is easy: reaching the depth buffer
+still requires identifying textures in the game's Metal render graph, which is
+game-specific and can break with any patch. But the door the overlay decision
+was built around is not locked.
+
+Re-run this diagnostic after any game update, and never record a verdict from a
+bundle that may still be downloading.
