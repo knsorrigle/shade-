@@ -40,6 +40,45 @@ On first run, grant **Screen Recording** permission to MetalShade, then quit
 and relaunch it. The app captures the first visible window owned by the bundle
 identifier. Its menu-bar icon is `MS`; it never appears in the Dock.
 
+## Control panel
+
+Choose **Control Panel…** from the menu-bar icon (or launch MetalShade without
+`--bundle`) to open the window. It holds everything the shortcuts do, plus the
+parts that previously had no interface at all:
+
+- Enable or bypass effects, pick sharpening or LUT grading, set intensity.
+- Brightness, contrast, saturation, and temperature sliders. These uniforms
+  existed before but could only be set by importing a preset.
+- A **Last import** panel listing every ReShade setting that could not be
+  honoured — including a specific note for depth-based effects. Those warnings
+  used to go only to the Console, so a preset could silently do almost nothing.
+
+The window and the global shortcuts share one state object, so they cannot
+drift apart.
+
+## Adding ReShade presets and LUTs
+
+Drag `.ini` presets and `.cube` LUTs onto the control panel's drop zone. Files
+are copied into a library folder, so a preset outlives the volume it came from:
+
+```text
+~/Library/Application Support/MetalShade/Presets/   # ReShade .ini
+~/Library/Application Support/MetalShade/LUTs/      # .cube
+```
+
+Both folders are watched. Dropping files into them in Finder is equivalent to
+dropping them on the window — the lists update either way, and deleting a file
+in Finder removes it from the app. **Presets Folder…** and **LUTs Folder…** in
+the menu open them. `open -a MetalShade preset.ini` imports too.
+
+A dropped preset applies immediately, and duplicate names are kept rather than
+overwritten (`Preset 2.ini`).
+
+What actually carries over from a ReShade preset is narrow — sharpening,
+brightness, contrast, saturation, temperature — and everything else is reported
+as skipped. An overlay has no depth buffer, so AO, DOF, and depth fog cannot
+work here regardless of what the preset asks for.
+
 The default global shortcuts, supplied by the MIT-licensed
 `KeyboardShortcuts` Swift package, do not require Accessibility permission:
 
@@ -55,7 +94,7 @@ Exactly two effect shaders are included:
 1. CAS-style adaptive sharpening.
 2. Standard 3D `.cube` LUT colour grading.
 
-Choose **Load .cube LUT…** from the status menu to load a LUT; an
+Drop a LUT on the control panel to load it; an
 [identity example](Examples/Identity.cube) is included. Shader source is
 created on first run at:
 
@@ -66,10 +105,6 @@ created on first run at:
 Save edits to this file to hot-reload both Metal pipelines. Compilation errors
 leave the last valid pipeline active and are written to Console.
 
-**Import ReShade preset…** accepts `.ini` files, applies only sharpening plus
-brightness, contrast, saturation, and temperature, and logs every unsupported
-setting. It specifically warns when skipping depth-dependent effects such as
-AO, DOF, or depth fog.
 
 ## Screenshots
 

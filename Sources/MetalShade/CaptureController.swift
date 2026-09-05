@@ -59,11 +59,6 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         } catch { report("Capture failed: \(error.localizedDescription)") }
     }
 
-    func toggleOverlay() {
-        renderer.toggleEffects()
-        report(renderer.effectDescription)
-    }
-
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else { return }
         renderer.submit(pixelBuffer: pixelBuffer)

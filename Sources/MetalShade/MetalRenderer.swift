@@ -11,7 +11,11 @@ struct EffectUniforms {
 }
 
 final class MetalRenderer {
-    enum Effect: CaseIterable { case cas, lut }
+    enum Effect: String, CaseIterable, Identifiable, Sendable {
+        case cas, lut
+        var id: String { rawValue }
+        var title: String { self == .cas ? "Sharpening" : "LUT grading" }
+    }
     let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let textureCache: CVMetalTextureCache
@@ -28,8 +32,7 @@ final class MetalRenderer {
 
     var effectDescription: String {
         guard effectsEnabled else { return "effects bypassed" }
-        let title = effect == .cas ? "CAS sharpening" : "3D LUT grading"
-        return "\(title), \(Int(uniforms.intensity * 100))%"
+        return "\(effect.title), \(Int(uniforms.intensity * 100))%"
     }
 
     init() throws {
@@ -48,14 +51,18 @@ final class MetalRenderer {
         }
     }
 
+    /// `AppModel` owns the user-facing state and pushes it here; these setters are
+    /// the only way the render state changes, so the window and the global
+    /// shortcuts cannot drift out of sync.
     func attach(view: MTKView) { self.view = view }
-    func cycleEffect() { effect = effect == .cas ? .lut : .cas }
-    func toggleEffects() { effectsEnabled.toggle() }
-    func adjustIntensity(by delta: Float) { uniforms.intensity = min(max(uniforms.intensity + delta, 0), 1) }
-    func apply(_ settings: PresetSettings) {
-        if let sharpening = settings.sharpening { uniforms.intensity = sharpening; effect = .cas }
-        uniforms.colorAdjust = [settings.color.brightness, settings.color.contrast, settings.color.saturation, settings.color.temperature]
+    func setEffect(_ newEffect: Effect) { effect = newEffect }
+    func setEffectsEnabled(_ enabled: Bool) { effectsEnabled = enabled }
+    func setIntensity(_ value: Float) { uniforms.intensity = min(max(value, 0), 1) }
+    func setColor(_ color: BasicColor) {
+        uniforms.colorAdjust = [color.brightness, color.contrast, color.saturation, color.temperature]
     }
+
+    var hasLUT: Bool { lutTexture != nil }
 
     func loadLUT(from url: URL) throws {
         let cube = try CubeLUT.parse(url: url)
@@ -63,7 +70,12 @@ final class MetalRenderer {
         lutTexture = texture
         uniforms.domainMin = SIMD4(cube.domainMin, 0)
         uniforms.domainMax = SIMD4(cube.domainMax, 0)
-        effect = .lut
+    }
+
+    func clearLUT() {
+        lutTexture = nil
+        uniforms.domainMin = SIMD4(0, 0, 0, 0)
+        uniforms.domainMax = SIMD4(1, 1, 1, 0)
     }
 
     func submit(pixelBuffer: CVPixelBuffer) {

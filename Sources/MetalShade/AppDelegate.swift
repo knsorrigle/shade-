@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
@@ -11,31 +12,55 @@ extension KeyboardShortcuts.Name {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
+    private var statusMenuItem: NSMenuItem!
     private var capture: CaptureController?
     private var renderer: MetalRenderer?
+    private let model = AppModel()
+    private var controlPanel: ControlPanelWindowController!
     private var options = LaunchOptions(arguments: CommandLine.arguments)
-    private var statusMenuItem: NSMenuItem!
+    private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        controlPanel = ControlPanelWindowController(model: model)
         makeMenu()
-        guard let bundleID = options.bundleID else {
-            setStatus("Start with --bundle <bundle-id>")
-            return
+        observeModel()
+
+        let library: PresetLibrary?
+        do {
+            library = try PresetLibrary()
+        } catch {
+            library = nil
+            model.report("Could not create the preset library: \(error.localizedDescription)")
         }
 
         do {
             let renderer = try MetalRenderer()
             self.renderer = renderer
+            model.attach(renderer: renderer, library: library)
+            installHotkeys()
+            importLaunchAssets()
+
+            guard let bundleID = options.bundleID else {
+                model.report("Start with --bundle <bundle-id>")
+                controlPanel.show()
+                return
+            }
             let capture = CaptureController(bundleID: bundleID, renderer: renderer) { [weak self] message in
-                DispatchQueue.main.async { self?.setStatus(message) }
+                DispatchQueue.main.async { self?.model.report(message) }
             }
             self.capture = capture
-            installHotkeys()
-            applyStartupAssets(to: renderer)
             capture.start()
         } catch {
-            setStatus("Metal unavailable: \(error.localizedDescription)")
+            model.report("Metal unavailable: \(error.localizedDescription)")
+            controlPanel.show()
         }
+    }
+
+    /// Files opened with MetalShade (`open -a MetalShade preset.ini`) are
+    /// imported exactly like a drop onto the control window.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        model.importFiles(urls)
+        controlPanel.show()
     }
 
     private func makeMenu() {
@@ -45,67 +70,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenuItem = NSMenuItem(title: "MetalShade: starting…", action: nil, keyEquivalent: "")
         menu.addItem(statusMenuItem)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Toggle Overlay", action: #selector(toggleOverlay), keyEquivalent: "")
+        menu.addItem(withTitle: "Control Panel…", action: #selector(showControlPanel), keyEquivalent: ",")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Toggle Effects", action: #selector(toggleOverlay), keyEquivalent: "")
         menu.addItem(withTitle: "Cycle Effect", action: #selector(cycleEffect), keyEquivalent: "")
         menu.addItem(withTitle: "Increase Intensity", action: #selector(increaseIntensity), keyEquivalent: "")
         menu.addItem(withTitle: "Decrease Intensity", action: #selector(decreaseIntensity), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Load .cube LUT…", action: #selector(showLUTPicker), keyEquivalent: "")
-        menu.addItem(withTitle: "Import ReShade preset…", action: #selector(showPresetPicker), keyEquivalent: "")
+        menu.addItem(withTitle: "Presets Folder…", action: #selector(revealPresets), keyEquivalent: "")
+        menu.addItem(withTitle: "LUTs Folder…", action: #selector(revealLUTs), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit MetalShade", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
     }
 
+    private func observeModel() {
+        model.$status
+            .receive(on: RunLoop.main)
+            .sink { [weak self] status in self?.statusMenuItem?.title = "MetalShade: \(status)" }
+            .store(in: &cancellables)
+    }
+
     private func installHotkeys() {
         // KeyboardShortcuts uses Carbon's global hotkey API: no Accessibility permission dialog.
-        KeyboardShortcuts.onKeyUp(for: .toggleOverlay) { [weak self] in self?.toggleOverlay() }
-        KeyboardShortcuts.onKeyUp(for: .cycleEffect) { [weak self] in self?.cycleEffect() }
-        KeyboardShortcuts.onKeyUp(for: .increaseIntensity) { [weak self] in self?.increaseIntensity() }
-        KeyboardShortcuts.onKeyUp(for: .decreaseIntensity) { [weak self] in self?.decreaseIntensity() }
+        KeyboardShortcuts.onKeyUp(for: .toggleOverlay) { [weak self] in self?.model.toggleEffects() }
+        KeyboardShortcuts.onKeyUp(for: .cycleEffect) { [weak self] in self?.model.cycleEffect() }
+        KeyboardShortcuts.onKeyUp(for: .increaseIntensity) { [weak self] in self?.model.adjustIntensity(by: 0.05) }
+        KeyboardShortcuts.onKeyUp(for: .decreaseIntensity) { [weak self] in self?.model.adjustIntensity(by: -0.05) }
     }
 
-    private func applyStartupAssets(to renderer: MetalRenderer) {
-        if let lut = options.lutPath { loadLUT(at: URL(fileURLWithPath: lut)) }
-        if let preset = options.presetPath { importPreset(at: URL(fileURLWithPath: preset)) }
+    private func importLaunchAssets() {
+        let paths = [options.lutPath, options.presetPath].compactMap { $0 }
+        guard !paths.isEmpty else { return }
+        model.importFiles(paths.map { URL(fileURLWithPath: $0) })
     }
 
-    @objc private func toggleOverlay() { capture?.toggleOverlay() }
-    @objc private func cycleEffect() { renderer?.cycleEffect(); setStatus(renderer?.effectDescription ?? "No renderer") }
-    @objc private func increaseIntensity() { renderer?.adjustIntensity(by: 0.05); setStatus(renderer?.effectDescription ?? "No renderer") }
-    @objc private func decreaseIntensity() { renderer?.adjustIntensity(by: -0.05); setStatus(renderer?.effectDescription ?? "No renderer") }
-
-    @objc private func showLUTPicker() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "cube")!]
-        panel.begin { [weak self] response in
-            if response == .OK, let url = panel.url { self?.loadLUT(at: url) }
-        }
-    }
-
-    private func loadLUT(at url: URL) {
-        do { try renderer?.loadLUT(from: url); setStatus("Loaded LUT: \(url.lastPathComponent)") }
-        catch { setStatus("LUT error: \(error.localizedDescription)") }
-    }
-
-    @objc private func showPresetPicker() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "ini")!]
-        panel.begin { [weak self] response in
-            if response == .OK, let url = panel.url { self?.importPreset(at: url) }
-        }
-    }
-
-    private func importPreset(at url: URL) {
-        do {
-            let report = try ReShadePreset.importPreset(at: url)
-            renderer?.apply(report.settings)
-            setStatus(report.warnings.isEmpty ? "Imported \(url.lastPathComponent)" : "Imported with \(report.warnings.count) skipped setting(s); see Console")
-            report.warnings.forEach { NSLog("MetalShade preset: \($0)") }
-        } catch { setStatus("Preset error: \(error.localizedDescription)") }
-    }
-
-    private func setStatus(_ text: String) { statusMenuItem?.title = "MetalShade: \(text)" }
+    @objc private func showControlPanel() { controlPanel.show() }
+    @objc private func toggleOverlay() { model.toggleEffects() }
+    @objc private func cycleEffect() { model.cycleEffect() }
+    @objc private func increaseIntensity() { model.adjustIntensity(by: 0.05) }
+    @objc private func decreaseIntensity() { model.adjustIntensity(by: -0.05) }
+    @objc private func revealPresets() { model.revealLibrary(.preset) }
+    @objc private func revealLUTs() { model.revealLibrary(.lut) }
 }
 
 private struct LaunchOptions {

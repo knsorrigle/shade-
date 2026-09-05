@@ -6,6 +6,27 @@ minor version may carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Control panel window (**Control Panel…** in the menu-bar menu): effect
+  selection, intensity, and the brightness/contrast/saturation/temperature
+  sliders, which previously had no interface and could only be set by importing
+  a preset.
+- Drag-and-drop import for ReShade `.ini` presets and `.cube` LUTs, backed by a
+  watched library at `~/Library/Application Support/MetalShade/{Presets,LUTs}`.
+  Dropping files into those folders in Finder works identically, and removing
+  one there removes it from the app. `open -a MetalShade preset.ini` imports as
+  well.
+- Preset import warnings are shown in the window. They previously went only to
+  `NSLog`, so a preset whose settings were nearly all unsupported appeared to
+  apply cleanly.
+
+### Changed
+
+- `AppModel` is now the single source of truth for render state. The window,
+  the menu, and the global shortcuts all mutate it and it pushes to
+  `MetalRenderer`, so they cannot disagree about what is on screen.
+
 ### Fixed
 
 - `scripts/build-app.sh` never copied the `KeyboardShortcuts` resource bundle
