@@ -74,10 +74,22 @@ the menu open them. `open -a MetalShade preset.ini` imports too.
 A dropped preset applies immediately, and duplicate names are kept rather than
 overwritten (`Preset 2.ini`).
 
-What actually carries over from a ReShade preset is narrow — sharpening,
-brightness, contrast, saturation, temperature — and everything else is reported
-as skipped. An overlay has no depth buffer, so AO, DOF, and depth fog cannot
-work here regardless of what the preset asks for.
+What carries over from a ReShade preset is narrow. The importer reads keys only
+from effects it recognises — `CAS`, `LumaSharpen`, `AdaptiveSharpen`,
+`qUINT_lightroom`, `Vibrance`, `Colourfulness`, `Tonemap` — and maps them onto
+sharpening, brightness, contrast, saturation, and temperature.
+
+It refuses to guess at the rest, because ReShade key names are scoped to their
+effect: `Saturation` inside `FilmicPass.fx` is an offset within a tone curve,
+not a global saturation multiplier. Everything else is reported, grouped by the
+effect it came from, with the reason. Depth-based effects — AO, DOF, GI, depth
+fog — can never work here, whatever the preset asks for.
+
+To see what a preset would do before importing it:
+
+```bash
+./scripts/check-preset.sh "~/Downloads/Some Preset.ini"
+```
 
 The default global shortcuts, supplied by the MIT-licensed
 `KeyboardShortcuts` Swift package, do not require Accessibility permission:
