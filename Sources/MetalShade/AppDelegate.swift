@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Diagnostics.beginSession("launch \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
         controlPanel = ControlPanelWindowController(model: model)
         makeMenu()
         observeModel()
@@ -117,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Presets Folder…", action: #selector(revealPresets), keyEquivalent: "")
         menu.addItem(withTitle: "LUTs Folder…", action: #selector(revealLUTs), keyEquivalent: "")
+        menu.addItem(withTitle: "Reveal Diagnostics Log…", action: #selector(revealDiagnostics), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit MetalShade (⌘⌥Q)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -151,6 +153,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func decreaseIntensity() { model.adjustIntensity(by: -0.05) }
     @objc private func revealPresets() { model.revealLibrary(.preset) }
     @objc private func revealLUTs() { model.revealLibrary(.lut) }
+    @objc private func revealDiagnostics() {
+        NSWorkspace.shared.activateFileViewerSelecting([Diagnostics.url])
+    }
 }
 
 private struct LaunchOptions {
