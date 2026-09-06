@@ -128,13 +128,23 @@ the game's own command buffer before presentation: the frame is copied to a
 scratch texture (a texture cannot be read and written in one pass) and rendered
 back through a sharpening shader that mirrors the overlay's.
 
-Verified in a purpose-built Metal application — pipeline compiled, first frame
-processed — and the payload has been confirmed to load and hook inside
-Cyberpunk 2077.
+Verified in Cyberpunk 2077, by reading a pixel back from the presented drawable
+rather than inferring from the fact that the code ran:
 
-Not yet verified: how it looks and performs across a real play session, and
-whether frame pacing holds. Depth-based effects remain out of reach until the
-game's depth texture is identified, which is per-game work.
+```text
+hooked -[CAMetalLayer nextDrawable]
+hooked -[AGXG16GFamilyCommandBuffer presentDrawable:]
+first frame processed in the game's command buffer
+centre pixel after processing: B=0 G=191 R=0 A=255
+```
+
+Not yet measured: frame rate and pacing across a real play session, which is the
+question injection exists to answer — the overlay collapsed to single-digit fps
+on this game.
+
+Depth-based effects remain out of reach. The depth texture is available inside
+the process, but identifying which texture it is means reading a specific game's
+render graph, and that is per-game work that breaks with patches.
 
 ## Cautions
 
