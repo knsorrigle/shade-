@@ -25,6 +25,8 @@ struct Uniforms {
     float4 lut;       // x mix
     float4 domainMin; // LUT input domain
     float4 domainMax;
+    float4 fog;       // x amount, y depth scale
+    float4 fogColour; // rgb
 };
 
 struct BlurParams { float4 direction; };  // xy = step in UV space
@@ -135,17 +137,36 @@ float3 applyGrade(float3 c, constant Uniforms& u) {
 
 // MARK: - Composite
 
+/// Depth fog: the first effect here that uses scene geometry rather than colour
+/// alone.
+///
+/// Depth is reversed-Z, so distant geometry sits near zero and the whole scene
+/// occupies a few thousandths. The scale brings that into 0..1; fog then grows
+/// with distance. Sky, which never had geometry written, reads as maximally
+/// distant and fogs fully — which is what it should do.
+float3 applyFog(float3 c, float depth, constant Uniforms& u) {
+    if (u.fog.x <= 0.0) { return c; }
+    float near = saturate(depth * u.fog.y);
+    float density = (1.0 - near) * u.fog.x;
+    return mix(c, u.fogColour.rgb, saturate(density));
+}
+
 fragment float4 compositeFragment(VertexOut in [[stage_in]],
                                   texture2d<float> src [[texture(0)]],
                                   texture2d<float> bloom [[texture(1)]],
                                   texture3d<float> lut [[texture(2)]],
+                                  depth2d<float> sceneDepth [[texture(3)]],
                                   constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
+    constexpr sampler depthSampler(address::clamp_to_edge, filter::nearest);
     float3 c = src.sample(s, in.uv).rgb;
 
     c = applySharpen(src, s, in.uv, c, u.a.x);
     c = applyClarity(src, s, in.uv, c, u.a.y);
     if (u.a.w > 0.0) { c += bloom.sample(s, in.uv).rgb * u.a.w; }
+    // Fog before tone mapping, so the added light is shaped by the curve rather
+    // than sitting flat on top of it.
+    c = applyFog(c, sceneDepth.sample(depthSampler, in.uv), u);
     c = applyTone(c, u.a.z);
     c = applyGrade(c, u);
 

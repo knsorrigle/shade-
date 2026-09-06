@@ -77,6 +77,8 @@ typedef struct {
     float lut[4];        // x mix — the payload binds an identity, so kept at 0
     float domainMin[4];
     float domainMax[4];
+    float fog[4];        // x amount, y depth scale
+    float fogColour[4];
 } MSUniforms;
 
 typedef struct { float direction[4]; } MSBlurParams;
@@ -85,10 +87,22 @@ static id<MTLRenderPipelineState> gComposite = nil;
 static id<MTLRenderPipelineState> gBrightPass = nil;
 static id<MTLRenderPipelineState> gBlur = nil;
 static id<MTLTexture> gScratch = nil, gBloomA = nil, gBloomB = nil, gLUT = nil;
+static id<MTLTexture> gDepthStub = nil;
+/// Our own copy of the scene depth.
+///
+/// Sampling the game's depth texture directly returns zero while a blit from the
+/// same texture in the same command buffer reads real values — the contents are
+/// resolvable but not sampleable as bound. Copying first makes them ours to read.
+static id<MTLTexture> gDepthCopy = nil;
+static BOOL UpdateDepthCopy(id<MTLCommandBuffer> commandBuffer);
 
 static float gSharpen = 0, gClarity = 0, gTone = 0, gBloom = 0, gBloomThreshold = 0.8f;
 static float gExposure = 0, gGamma = 1.0f, gVibrance = 0;
 static float gBrightness = 0, gContrast = 1.0f, gSaturation = 1.0f, gTemperature = 0;
+/// Depth fog. The scale maps reversed-Z, where the scene occupies a few
+/// thousandths, onto 0..1; 128 matches what Cyberpunk 2077 produces.
+static float gFog = 0, gFogScale = 128.0f;
+static float gFogR = 0.62f, gFogG = 0.68f, gFogB = 0.76f;
 static BOOL gTint = NO;
 static BOOL gDisabled = NO;
 /// Draws the scene depth buffer instead of the frame, to establish that it is
@@ -119,6 +133,11 @@ static void ApplySettingsFile(void) {
     gContrast       = ReadNumber(json, @"contrast", gContrast);
     gSaturation     = ReadNumber(json, @"saturation", gSaturation);
     gTemperature    = ReadNumber(json, @"temperature", gTemperature);
+    gFog            = ReadNumber(json, @"fog", gFog);
+    gFogScale       = ReadNumber(json, @"fogScale", gFogScale);
+    gFogR           = ReadNumber(json, @"fogR", gFogR);
+    gFogG           = ReadNumber(json, @"fogG", gFogG);
+    gFogB           = ReadNumber(json, @"fogB", gFogB);
     NSNumber *tint = json[@"tint"];
     if ([tint isKindOfClass:[NSNumber class]]) { gTint = tint.boolValue; }
 }
@@ -160,6 +179,7 @@ static void StartSettingsPolling(void) {
 /// so an idle session costs the game nothing.
 static BOOL HasVisibleEffect(void) {
     return gTint || gSharpen > 0.001f || gClarity > 0.001f || gTone > 0.001f || gBloom > 0.001f
+        || gFog > 0.001f
         || fabsf(gExposure) > 0.001f || fabsf(gGamma - 1.0f) > 0.001f
         || fabsf(gVibrance) > 0.001f || fabsf(gBrightness) > 0.001f
         || fabsf(gContrast - 1.0f) > 0.001f || fabsf(gSaturation - 1.0f) > 0.001f
@@ -197,6 +217,16 @@ static BOOL EnsurePipelines(id<MTLDevice> device, MTLPixelFormat format) {
     gBrightPass = MakePipeline(device, library, @"brightPassFragment", format);
     gBlur       = MakePipeline(device, library, @"blurFragment", format);
     if (!gComposite || !gBrightPass || !gBlur) { return NO; }
+
+    // The composite always samples a depth texture too. A 1x1 stand-in keeps it
+    // valid when no scene depth has been found, and fog is forced off in that
+    // case so the stand-in cannot affect the picture.
+    MTLTextureDescriptor *depthStub =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                           width:1 height:1 mipmapped:NO];
+    depthStub.usage = MTLTextureUsageShaderRead;
+    depthStub.storageMode = MTLStorageModePrivate;
+    gDepthStub = [device newTextureWithDescriptor:depthStub];
 
     // The composite always samples a LUT; a 2x2x2 identity keeps it valid when
     // none is loaded, rather than leaving an unbound texture to sample.
@@ -272,6 +302,8 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
         { 0, 0, 0, 0 },
         { 0, 0, 0, 0 },
         { 1, 1, 1, 0 },
+        { gDepthCopy ? gFog : 0.0f, gFogScale, 0, 0 },
+        { gFogR, gFogG, gFogB, 0 },
     };
 
     // A texture cannot be read and written in one pass, so the frame goes to
@@ -304,6 +336,7 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
     [encoder setFragmentTexture:gScratch atIndex:0];
     [encoder setFragmentTexture:gBloomA ?: gScratch atIndex:1];
     [encoder setFragmentTexture:gLUT atIndex:2];
+    [encoder setFragmentTexture:gDepthCopy ?: gDepthStub atIndex:3];
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
@@ -498,6 +531,15 @@ static void InstallDirectPresentHook(void) {
 // It only observes. Nothing is modified and nothing is sampled.
 
 static IMP gOriginalRenderEncoder = NULL;
+static IMP gOriginalCommit = NULL;
+/// Command buffers that encoded a scene-depth pass this frame.
+///
+/// Copying at presentation is too late: by then the next frame's depth pass has
+/// already overwritten most of the buffer, leaving a band of valid data and the
+/// rest reading as maximally distant. Copying when the buffer that wrote depth
+/// commits captures it whole.
+static NSHashTable *gBuffersWithDepth = nil;
+static void MS_commit(id self, SEL _cmd);
 static NSMutableSet<NSString *> *gSeenDepth = nil;
 
 /// The scene depth texture, held from the pass that writes it.
@@ -512,13 +554,41 @@ static NSString *gSceneDepthKey = nil;
 /// by reading them rather than by guessing from size.
 static NSMutableArray<id<MTLTexture>> *gDepthCandidates = nil;
 static id<MTLRenderPipelineState> gDepthView = nil;
-/// Our own copy of the scene depth.
-///
-/// Sampling the game's depth texture directly returns zero while a blit from the
-/// same texture in the same command buffer reads real values — the contents are
-/// resolvable but not sampleable as bound. Copying first makes them ours to read.
-static id<MTLTexture> gDepthCopy = nil;
 static void PrintDepthThumbnail(id<MTLCommandBuffer> commandBuffer);
+
+/// Copies the scene depth into a texture of ours.
+///
+/// The game's depth texture cannot be sampled directly — a shader reads zero
+/// from it while a blit in the same command buffer reads real values — so the
+/// copy is what makes it usable.
+static BOOL UpdateDepthCopy(id<MTLCommandBuffer> commandBuffer) {
+    id<MTLTexture> depth = nil;
+    @synchronized (gSeenDepth ?: (id)[NSNull null]) { depth = gSceneDepth; }
+    if (!depth) { return NO; }
+
+    if (!gDepthCopy || gDepthCopy.width != depth.width || gDepthCopy.height != depth.height
+        || gDepthCopy.pixelFormat != depth.pixelFormat) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth.pixelFormat
+                                                               width:depth.width
+                                                              height:depth.height
+                                                           mipmapped:NO];
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModePrivate;
+        gDepthCopy = [depth.device newTextureWithDescriptor:descriptor];
+        if (!gDepthCopy) { return NO; }
+        MSLog(@"depth copy allocated %lux%lu", (unsigned long)depth.width, (unsigned long)depth.height);
+    }
+
+    id<MTLBlitCommandEncoder> copy = [commandBuffer blitCommandEncoder];
+    [copy copyFromTexture:depth sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(depth.width, depth.height, 1)
+                toTexture:gDepthCopy destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [copy endEncoding];
+    return YES;
+}
 
 /// Distinguishes scene depth from the other depth targets a frame produces.
 ///
@@ -565,6 +635,9 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
                     // Size alone cannot tell a populated scene depth from a
                     // pre-pass target that is still cleared; the survey below
                     // reads them instead.
+                    if (!gBuffersWithDepth) {
+                        gBuffersWithDepth = [NSHashTable weakObjectsHashTable];
+                    }
                     BOOL preferable = !gSceneDepth
                         || (depth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8
                             && gSceneDepth.pixelFormat != MTLPixelFormatDepth32Float_Stencil8);
@@ -576,6 +649,9 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
                             gSceneDepthKey = key;
                             MSLog(@"provisional scene depth %@", key);
                         }
+                    }
+                    if (depth == gSceneDepth) {
+                        [gBuffersWithDepth addObject:self];
                     }
                 }
             }
@@ -603,14 +679,20 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
 }
 
 static void InstallDepthProbe(Class bufferClass) {
-    // Also required to show depth: the texture is only reachable from the pass
-    // that writes it.
-    if (!getenv("METALSHADE_PROBE_DEPTH") && !gShowDepth) { return; }
+    // Always installed. Scene depth is only reachable from the pass that writes
+    // it, and fog can be switched on at any time through the settings file —
+    // long after this runs. The hook itself is a comparison per render pass.
     Method method = class_getInstanceMethod(bufferClass, @selector(renderCommandEncoderWithDescriptor:));
     if (!method) { MSLog(@"no -renderCommandEncoderWithDescriptor: to probe"); return; }
     gSeenDepth = [NSMutableSet set];
     gOriginalRenderEncoder = method_getImplementation(method);
     method_setImplementation(method, (IMP)MS_renderCommandEncoder);
+
+    Method commit = class_getInstanceMethod(bufferClass, @selector(commit));
+    if (commit) {
+        gOriginalCommit = method_getImplementation(commit);
+        method_setImplementation(commit, (IMP)MS_commit);
+    }
     MSLog(@"depth probe active — reporting each distinct depth target once");
 }
 
@@ -791,27 +873,7 @@ static BOOL DrawDepthView(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable
     id<MTLTexture> target = drawable.texture;
     if (!EnsureDepthView(target.device, target.pixelFormat)) { gShowDepth = NO; return NO; }
 
-    if (!gDepthCopy || gDepthCopy.width != depth.width || gDepthCopy.height != depth.height
-        || gDepthCopy.pixelFormat != depth.pixelFormat) {
-        MTLTextureDescriptor *descriptor =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth.pixelFormat
-                                                               width:depth.width
-                                                              height:depth.height
-                                                           mipmapped:NO];
-        descriptor.usage = MTLTextureUsageShaderRead;
-        descriptor.storageMode = MTLStorageModePrivate;
-        gDepthCopy = [depth.device newTextureWithDescriptor:descriptor];
-        if (!gDepthCopy) { gShowDepth = NO; return NO; }
-        MSLog(@"depth copy allocated %lux%lu", (unsigned long)depth.width, (unsigned long)depth.height);
-    }
-
-    id<MTLBlitCommandEncoder> copy = [commandBuffer blitCommandEncoder];
-    [copy copyFromTexture:depth sourceSlice:0 sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(depth.width, depth.height, 1)
-                toTexture:gDepthCopy destinationSlice:0 destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [copy endEncoding];
+    if (!gDepthCopy) { return NO; }
 
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
@@ -895,6 +957,25 @@ static void PrintDepthThumbnail(id<MTLCommandBuffer> commandBuffer) {
         MSLog(@"depth thumbnail (%lu distinct values across %lu pixels):%@",
               (unsigned long)distinct.count, (unsigned long)(width * height), picture);
     }];
+}
+
+/// Appends the depth copy to a command buffer that wrote scene depth, just
+/// before it commits. Every encoder is closed by then, so a blit can be added,
+/// and it runs after the depth pass rather than a frame later.
+static void MS_commit(id self, SEL _cmd) {
+    @try {
+        BOOL wroteDepth = NO;
+        @synchronized (gSeenDepth ?: (id)[NSNull null]) {
+            wroteDepth = gBuffersWithDepth && [gBuffersWithDepth containsObject:self];
+            if (wroteDepth) { [gBuffersWithDepth removeObject:self]; }
+        }
+        if (wroteDepth && (gFog > 0.001f || gShowDepth)) {
+            UpdateDepthCopy((id<MTLCommandBuffer>)self);
+        }
+    } @catch (NSException *exception) {
+        MSLog(@"depth capture at commit disabled: %@", exception.reason);
+    }
+    ((void (*)(id, SEL))gOriginalCommit)(self, _cmd);
 }
 
 #pragma mark - Entry point
