@@ -46,14 +46,37 @@ The script refuses to launch when the target's signature would ignore the
 payload, rather than starting a silent no-op. Output goes to
 `~/Library/Application Support/MetalShade/inject.log`.
 
-For a Steam game, prefer Steam's own launch options so Steam starts the game the
-way it expects (overlay, cloud saves, playtime):
+For a Steam game, Steam's own launch options keep Steam starting the game the way
+it expects (overlay, cloud saves, playtime).
+
+**macOS Steam does not run launch options through a shell.** The
+`VAR=value %command%` form that works on Linux fails here: Steam tries to
+execute `VAR=value` as the program and reports *Failed to start process for this
+game : OS Error 260*. Put `/usr/bin/env` first, so the program Steam launches is
+a real executable:
 
 ```text
-DYLD_INSERT_LIBRARIES=/absolute/path/to/libMetalShadeInject.dylib %command%
+/usr/bin/env DYLD_INSERT_LIBRARIES=/absolute/path/to/libMetalShadeInject.dylib %command%
 ```
 
-Right-click the game in Steam → Properties → Launch Options.
+With an effect enabled:
+
+```text
+/usr/bin/env METALSHADE_TINT=1 DYLD_INSERT_LIBRARIES=/absolute/path/to/libMetalShadeInject.dylib %command%
+```
+
+Right-click the game in Steam → Properties → Launch Options. Use an absolute
+path; `~` is not expanded, because no shell is involved.
+
+If that still fails, launch the game directly instead — this works with the
+Steam client running, which is enough for Steam's own checks:
+
+```bash
+./scripts/inject.sh "$HOME/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077/Cyberpunk2077.app"
+```
+
+The trade is that Steam does not see the session: no in-game overlay, no
+playtime, no automatic cloud-save sync.
 
 ## Which games this works for
 
