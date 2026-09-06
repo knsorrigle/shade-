@@ -101,7 +101,7 @@ static float gExposure = 0, gGamma = 1.0f, gVibrance = 0;
 static float gBrightness = 0, gContrast = 1.0f, gSaturation = 1.0f, gTemperature = 0;
 /// Depth fog. The scale maps reversed-Z, where the scene occupies a few
 /// thousandths, onto 0..1; 128 matches what Cyberpunk 2077 produces.
-static float gFog = 0, gFogScale = 128.0f;
+static float gFog = 0, gFogScale = 0.0003f;
 static float gFogR = 0.62f, gFogG = 0.68f, gFogB = 0.76f;
 static BOOL gTint = NO;
 static BOOL gDisabled = NO;

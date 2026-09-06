@@ -19,7 +19,7 @@ struct EffectUniforms {
     var domainMin = SIMD4<Float>(0, 0, 0, 0)
     var domainMax = SIMD4<Float>(1, 1, 1, 0)
     /// Fog amount and depth scale. Always zero here: the overlay has no depth.
-    var fog = SIMD4<Float>(0, 128, 0, 0)
+    var fog = SIMD4<Float>(0, 0.0003, 0, 0)
     var fogColour = SIMD4<Float>(0.62, 0.68, 0.76, 0)
 }
 

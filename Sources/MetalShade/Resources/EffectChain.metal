@@ -146,9 +146,19 @@ float3 applyGrade(float3 c, constant Uniforms& u) {
 /// distant and fogs fully — which is what it should do.
 float3 applyFog(float3 c, float depth, constant Uniforms& u) {
     if (u.fog.x <= 0.0) { return c; }
-    float near = saturate(depth * u.fog.y);
-    float density = (1.0 - near) * u.fog.x;
-    return mix(c, u.fogColour.rgb, saturate(density));
+    // Nothing was rendered here. Both sky and the game's own HUD and menus leave
+    // depth untouched, and this effect runs after the game has composited them,
+    // so without this the interface fogs along with the world. Leaving the sky
+    // unfogged is the cost; fogging the menu is not acceptable.
+    if (depth <= 0.0) { return c; }
+    // Reversed-Z: distance is inversely proportional to depth, not linear in it.
+    // Treating depth as linear fogged everything past a few metres solid, because
+    // the entire scene occupies a few thousandths at the near end of the range.
+    float distance = 1.0 / max(depth, 1e-6);
+    // Exponential falloff, the standard atmospheric model: near stays clear and
+    // density accumulates with distance rather than switching on at a threshold.
+    float density = 1.0 - exp(-distance * u.fog.y);
+    return mix(c, u.fogColour.rgb, saturate(density) * u.fog.x);
 }
 
 fragment float4 compositeFragment(VertexOut in [[stage_in]],
