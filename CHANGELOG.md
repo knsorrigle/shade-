@@ -6,6 +6,18 @@ minor version may carry breaking changes.
 
 ## [Unreleased]
 
+### Verified
+
+- **The capture pipeline works end to end against Cyberpunk 2077** (2026-09-06).
+  The diagnostic tint rendered over the running game, which requires every link
+  to hold: the Screen Recording grant, locating a full-screen window on its own
+  Space, ScreenCaptureKit delivering frames (~57 fps sustained), those frames
+  reaching the renderer, the fragment shader executing, and the overlay
+  compositing above a full-screen game.
+- Still unverified: whether the game continues rendering with the overlay above
+  it. Every apparent freeze so far has been the game's own pause menu, shown
+  because it lost focus to the control panel.
+
 ### Added
 
 - The capture target is chosen in the window. The panel lists games found in the
