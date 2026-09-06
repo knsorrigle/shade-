@@ -229,6 +229,14 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         Task { @MainActor [weak self] in
             self?.overlay?.targetIsFrontmost = isTarget
         }
+        // Most games pause when they lose focus, and their pause screen reads as a
+        // frozen overlay. Say so rather than leaving it to be worked out.
+        if !isTarget {
+            report("Target is not in front — most games pause when they lose focus, "
+                + "which looks like a frozen picture. Click the game to resume. The "
+                + "⌘⌥ shortcuts adjust effects without taking focus.")
+        }
+        Diagnostics.log("frontmost=\(front ?? "none") target=\(bundleID) overlay=\(isTarget ? "shown" : "hidden")")
     }
 
     /// Reports the delivered frame rate once a second. Whether frames are

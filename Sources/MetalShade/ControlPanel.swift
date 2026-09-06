@@ -57,9 +57,15 @@ struct ControlPanelView: View {
                 }
                 // A full-screen overlay covers everything. These shortcuts work
                 // even when it does, and are the way out if the picture goes wrong.
-                Text("⌘⌥O bypasses effects · ⌘⌥Q quits, both from anywhere")
+                Text("While playing, use the shortcuts — clicking this window takes "
+                    + "focus from the game, and most games pause when that happens.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("⌘⌥↑ / ⌘⌥↓ intensity · ⌘⌥→ effect · ⌘⌥O bypass · ⌘⌥Q quit")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
