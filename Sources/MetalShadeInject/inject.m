@@ -55,7 +55,7 @@ static void MSLog(NSString *format, ...) {
 static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "using namespace metal;\n"
 "struct VertexOut { float4 position [[position]]; float2 uv; };\n"
-"struct Uniforms { float4 params; float4 tint; };\n"
+"struct Uniforms { float4 params; float4 tint; float4 colour; };\n""// params.x sharpen; colour = brightness, contrast, saturation, temperature\n"
 "vertex VertexOut msVertex(uint id [[vertex_id]]) {\n"
 "  float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };\n"
 "  VertexOut o; o.position = float4(p[id], 0, 1);\n"
@@ -74,18 +74,26 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "  float3 avg = (n + e + w + so) * 0.25;\n"
 "  float range = max(max(c.r,c.g),c.b) - min(min(c.r,c.g),c.b);\n"
 "  float k = u.params.x * (1.0 - smoothstep(0.2, 0.9, range));\n"
-"  return float4(clamp(c + (c - avg) * k, 0.0, 1.0), 1.0); }\n";
+"  c = c + (c - avg) * k;\n"
+"  c += u.colour.x;\n"
+"  c = (c - 0.5) * u.colour.y + 0.5;\n"
+"  float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
+"  c = mix(float3(l), c, u.colour.z);\n"
+"  c += u.colour.w * float3(0.05, 0.0, -0.05);\n"
+"  return float4(clamp(c, 0.0, 1.0), 1.0); }\n";
 
 /// Laid out as two float4s so the C and Metal views cannot disagree. Metal
 /// aligns float3 to 16 bytes, so a `{ float; float3; }` pair is not the packed
 /// five floats a C struct would suggest — the earlier layout put the tint flag
 /// where the shader read padding.
-typedef struct { float params[4]; float tint[4]; } MSUniforms;
+typedef struct { float params[4]; float tint[4]; float colour[4]; } MSUniforms;
 
 static id<MTLRenderPipelineState> gPipeline = nil;
 static id<MTLTexture> gScratch = nil;
 static float gIntensity = 0.0f;
 static BOOL gTint = NO;
+// Neutral: no brightness shift, unit contrast and saturation, no temperature.
+static float gBrightness = 0.0f, gContrast = 1.0f, gSaturation = 1.0f, gTemperature = 0.0f;
 static BOOL gDisabled = NO;
 
 /// Path the app writes live settings to. Environment variables are fixed at
@@ -111,6 +119,27 @@ static void ApplySettingsFile(void) {
     if ([tint isKindOfClass:[NSNumber class]]) {
         gTint = tint.boolValue;
     }
+
+    // Colour grading is most of what a ReShade preset actually contributes;
+    // sharpening alone is close to invisible in motion.
+    NSNumber *brightness = json[@"brightness"];
+    NSNumber *contrast = json[@"contrast"];
+    NSNumber *saturation = json[@"saturation"];
+    NSNumber *temperature = json[@"temperature"];
+    if ([brightness isKindOfClass:[NSNumber class]]) { gBrightness = brightness.floatValue; }
+    if ([contrast isKindOfClass:[NSNumber class]]) { gContrast = contrast.floatValue; }
+    if ([saturation isKindOfClass:[NSNumber class]]) { gSaturation = saturation.floatValue; }
+    if ([temperature isKindOfClass:[NSNumber class]]) { gTemperature = temperature.floatValue; }
+}
+
+/// True when any stage would change the picture. Nothing is encoded otherwise,
+/// so an idle session costs the game nothing.
+static BOOL HasVisibleEffect(void) {
+    return gTint || gIntensity > 0.0f
+        || fabsf(gBrightness) > 0.001f
+        || fabsf(gContrast - 1.0f) > 0.001f
+        || fabsf(gSaturation - 1.0f) > 0.001f
+        || fabsf(gTemperature) > 0.001f;
 }
 
 /// Polls rather than watching: the file is tiny, half a second is responsive
@@ -137,7 +166,10 @@ static void ReadSettings(void) {
     // A settings file, if the app has written one, wins over the launch
     // environment: it is the live channel.
     ApplySettingsFile();
-    MSLog(@"settings: intensity %.2f, tint %@", gIntensity, gTint ? @"on" : @"off");
+    MSLog(@"settings: intensity %.2f, tint %@, brightness %+.2f contrast %.2f "
+          @"saturation %.2f temperature %+.2f",
+          gIntensity, gTint ? @"on" : @"off",
+          gBrightness, gContrast, gSaturation, gTemperature);
 }
 
 static BOOL EnsurePipeline(id<MTLDevice> device, MTLPixelFormat format) {
@@ -203,6 +235,10 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
     uniforms.params[1] = uniforms.params[2] = uniforms.params[3] = 0;
     uniforms.tint[0] = 0; uniforms.tint[1] = 1; uniforms.tint[2] = 0;   // green
     uniforms.tint[3] = gTint ? 1.0f : 0.0f;                              // enabled
+    uniforms.colour[0] = gBrightness;
+    uniforms.colour[1] = gContrast;
+    uniforms.colour[2] = gSaturation;
+    uniforms.colour[3] = gTemperature;
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
@@ -266,7 +302,7 @@ static id<CAMetalDrawable> MS_nextDrawable(id self, SEL _cmd) {
 }
 
 static void MS_presentDrawable(id self, SEL _cmd, id<CAMetalDrawable> drawable) {
-    if (!gDisabled && drawable && (gIntensity > 0.0f || gTint)) {
+    if (!gDisabled && drawable && HasVisibleEffect()) {
         // Never let a fault here take the game down: fall through to an
         // unmodified present and stop trying.
         @try {

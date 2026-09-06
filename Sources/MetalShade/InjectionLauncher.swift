@@ -38,14 +38,22 @@ enum InjectionLauncher {
         return root.appendingPathComponent("inject-settings.json")
     }
 
-    static func writeSettings(intensity: Float, tint: Bool) {
-        let payload: [String: Any] = ["intensity": intensity, "tint": tint]
+    static func writeSettings(intensity: Float, tint: Bool, colour: BasicColor) {
+        let payload: [String: Any] = [
+            "intensity": intensity,
+            "tint": tint,
+            "brightness": colour.brightness,
+            "contrast": colour.contrast,
+            "saturation": colour.saturation,
+            "temperature": colour.temperature,
+        ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         try? data.write(to: settingsURL, options: .atomic)
     }
 
     @discardableResult
-    static func launch(game: GameLibrary.Game, intensity: Float, tint: Bool) throws -> Process {
+    static func launch(game: GameLibrary.Game, intensity: Float, tint: Bool,
+                       colour: BasicColor) throws -> Process {
         guard let payloadURL else { throw LaunchError.payloadMissing }
 
         let plist = game.bundleURL.appendingPathComponent("Contents/Info.plist")
@@ -66,7 +74,7 @@ enum InjectionLauncher {
                 target: targetArch, payload: payloadArchs.joined(separator: ", "))
         }
 
-        writeSettings(intensity: intensity, tint: tint)
+        writeSettings(intensity: intensity, tint: tint, colour: colour)
 
         var environment = ProcessInfo.processInfo.environment
         environment["DYLD_INSERT_LIBRARIES"] = payloadURL.path

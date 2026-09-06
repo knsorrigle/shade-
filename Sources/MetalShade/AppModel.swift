@@ -80,7 +80,12 @@ final class AppModel: ObservableObject {
             refreshStatus()
         }
     }
-    @Published var color = BasicColor() { didSet { renderer?.setColor(color) } }
+    @Published var color = BasicColor() {
+        didSet {
+            renderer?.setColor(color)
+            pushInjectionSettings()
+        }
+    }
     /// Paints the overlay a solid colour. Answers "is the overlay reaching the
     /// screen at all", which no subtle effect can.
     @Published var diagnosticTint = false {
@@ -149,7 +154,7 @@ final class AppModel: ObservableObject {
             // be a second, redundant pass.
             if activeTarget != nil { stopCapture() }
             let process = try InjectionLauncher.launch(
-                game: game, intensity: intensity, tint: diagnosticTint)
+                game: game, intensity: intensity, tint: diagnosticTint, colour: color)
             injectedProcess = process
             injectedGame = game
             renderMode = .injected
@@ -173,7 +178,7 @@ final class AppModel: ObservableObject {
     /// change while the game runs.
     private func pushInjectionSettings() {
         guard injectedGame != nil else { return }
-        InjectionLauncher.writeSettings(intensity: intensity, tint: diagnosticTint)
+        InjectionLauncher.writeSettings(intensity: intensity, tint: diagnosticTint, colour: color)
     }
 
     func stopCapture() {
