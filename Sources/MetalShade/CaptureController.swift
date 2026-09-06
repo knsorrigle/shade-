@@ -14,6 +14,8 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private var frameCount = 0
     private var rateTimer: Timer?
     private let countLock = NSLock()
+    /// One prompt per launch, however many targets are tried.
+    private static var hasRequestedAccess = false
 
     init(bundleID: String, renderer: MetalRenderer, report: @escaping (String) -> Void) {
         self.bundleID = bundleID
@@ -22,9 +24,20 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func start() {
+        Diagnostics.log("start requested for \(bundleID)")
         guard CGPreflightScreenCaptureAccess() else {
-            report("Screen Recording permission required; approve it, then relaunch MetalShade")
-            CGRequestScreenCaptureAccess()
+            Diagnostics.log("screen recording permission missing")
+            // Ask at most once per launch. Requesting again on every attempt
+            // produced a prompt each time a target was picked, which reads as
+            // the permission never sticking.
+            if !CaptureController.hasRequestedAccess {
+                CaptureController.hasRequestedAccess = true
+                CGRequestScreenCaptureAccess()
+            }
+            report("Screen Recording is not granted. Approve MetalShade in "
+                + "System Settings › Privacy & Security › Screen Recording, then quit "
+                + "and reopen MetalShade. Approving does not affect a process that is "
+                + "already running.")
             return
         }
         Task { [weak self] in await self?.startCapture() }
@@ -32,13 +45,30 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func startCapture() async {
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let window = content.windows.first(where: {
-                $0.owningApplication?.bundleIdentifier == bundleID && $0.isOnScreen && $0.frame.width > 100 && $0.frame.height > 100
+            // onScreenWindowsOnly must be false. A game running full-screen lives on
+            // its own Space, and from MetalShade's Space its window is not "on
+            // screen" — the previous filter therefore never found it, and the
+            // failure was invisible because the panel is on another Space too.
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let candidates = content.windows.filter {
+                $0.owningApplication?.bundleIdentifier == bundleID
+                    && $0.frame.width > 200 && $0.frame.height > 200
+            }
+            Diagnostics.log("target \(bundleID): \(candidates.count) candidate window(s)")
+            for candidate in candidates {
+                Diagnostics.log("  id=\(candidate.windowID) \(Int(candidate.frame.width))x\(Int(candidate.frame.height))"
+                    + " onScreen=\(candidate.isOnScreen) title=\(candidate.title ?? "-")")
+            }
+            // Games spawn helper windows; take the largest.
+            guard let window = candidates.max(by: {
+                $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
             }) else {
-                report("No visible window for \(bundleID). Launch the game, then restart MetalShade.")
+                let message = "No window found for \(bundleID). Is it running?"
+                Diagnostics.log(message)
+                report(message)
                 return
             }
+            Diagnostics.log("chose window \(window.windowID) at \(window.frame)")
 
             targetWindowID = window.windowID
             let overlay = try await MainActor.run { try OverlayWindow(renderer: self.renderer, captureFrame: window.frame) }
@@ -57,6 +87,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "io.metalshade.capture", qos: .userInteractive))
             self.stream = stream
             try await stream.startCapture()
+            Diagnostics.log("stream started \(configuration.width)x\(configuration.height)")
             await MainActor.run {
                 // Reveal only once a frame has been drawn; an overlay shown before
                 // that covers the target in black.
@@ -70,7 +101,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             beginRateReporting()
             scheduleNoFrameCheck()
             report("Waiting for frames from \(bundleID)…")
-        } catch { report("Capture failed: \(error.localizedDescription)") }
+        } catch {
+            Diagnostics.log("capture failed: \(error.localizedDescription)")
+            report("Capture failed: \(error.localizedDescription)")
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -108,7 +142,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func refreshOverlayFrame() async {
         guard let targetWindowID else { return }
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
               let window = content.windows.first(where: { $0.windowID == targetWindowID }) else { return }
         await MainActor.run { self.overlay?.update(captureFrame: window.frame) }
     }
@@ -123,6 +157,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             let count = self.frameCount
             self.frameCount = 0
             self.countLock.unlock()
+            // Log every tick, including zeroes. Silence is ambiguous: it cannot
+            // distinguish a stream that never delivers from one that delivers
+            // only while the game's Space is in front.
+            Diagnostics.log("\(count) fps")
             guard self.receivedFrame else { return }
             self.report("Capturing \(self.bundleID) — \(count) fps, \(self.renderer.effectDescription)")
         }
@@ -133,6 +171,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private func scheduleNoFrameCheck() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self, !self.receivedFrame else { return }
+            Diagnostics.log("no frames after 3s")
             self.report("No frames after 3s — check Screen Recording for MetalShade in System Settings, then relaunch.")
         }
     }

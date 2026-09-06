@@ -73,6 +73,20 @@ plist_buddy=/usr/libexec/PlistBuddy
 "$plist_buddy" -c "Set :CFBundleVersion $build_version" "$output_dir/Contents/Info.plist"
 "$plist_buddy" -c "Add :MetalShadeSourceRevision string $revision" "$output_dir/Contents/Info.plist"
 
+# Fail before signing rather than after: a codesign failure part-way leaves a
+# bundle that looks built but carries only the linker's signature, which is
+# indistinguishable from a signed one at a glance and silently loses any TCC
+# grant tied to the real identity.
+if [[ "$sign_identity" != "-" ]]; then
+    if ! security find-identity -v -p codesigning | grep -qF "$sign_identity"; then
+        rm -rf "$output_dir"
+        echo "error: no valid code-signing identity named '$sign_identity'." >&2
+        echo "       Create one with ./scripts/create-dev-cert.sh, or list what you have:" >&2
+        echo "         security find-identity -v -p codesigning" >&2
+        exit 1
+    fi
+fi
+
 # Sign nested bundles before the outer bundle, innermost first.
 timestamp_flag=(--timestamp)
 if [[ "$sign_identity" == "-" ]]; then
