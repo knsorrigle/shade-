@@ -8,6 +8,9 @@ minor version may carry breaking changes.
 
 ### Verified
 
+- **Bloom and filmic tone confirmed in Cyberpunk 2077** (2026-09-06), adjusted
+  live during play through the injection route.
+
 - **Injection works on Cyberpunk 2077** (2026-09-06). The payload loads into the
   game's process, hooks `-[CAMetalLayer nextDrawable]` and
   `-[AGXG16GFamilyCommandBuffer presentDrawable:]`, and encodes a post-process

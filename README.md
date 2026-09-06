@@ -4,20 +4,40 @@ MetalShade is an open-source macOS post-processing tool for native Metal games.
 It detects installed games, works out which techniques each one actually
 permits, and applies effects by whichever route that game allows.
 
-It is a menu-bar-only app. Today it captures a game window with
-ScreenCaptureKit, processes the texture with Metal, and draws a click-through
-overlay above the window.
+It is a menu-bar-only app. It finds installed games, reports which route each
+one permits, and applies effects by that route.
 
 ## Methods
 
 Different games permit different things, and MetalShade reports which, per
-game, rather than assuming. Only the first of these is implemented:
+game, rather than assuming.
 
 | Method | How it works | Depth-based effects | Status |
 |---|---|---|---|
-| **Overlay** | ScreenCaptureKit captures the window; Metal processes it; a click-through window draws the result | No — the depth buffer is gone before capture | **Implemented** |
-| **Injection** | `DYLD_INSERT_LIBRARIES` loads a dylib that hooks the game's Metal command stream | Possible in principle — needs the game's depth textures identified | Not implemented; viability is detected per game |
-| **Estimated depth** | A monocular depth model over the captured frame synthesises an approximate depth buffer | Approximate; soft and temporally unstable | Not implemented |
+| **Injection** | `DYLD_INSERT_LIBRARIES` loads a payload that hooks the game's Metal presentation and encodes effects into the game's own command buffer | Not yet — see below | **Works**; preferred where the signature permits it |
+| **Overlay** | ScreenCaptureKit captures the window; Metal processes it; a click-through window draws the result | No — the depth buffer is gone before capture | **Works**; the fallback for games that cannot load a library |
+| **Estimated depth** | A monocular depth model over the frame synthesises an approximate depth buffer | Approximate; soft and temporally unstable | Not implemented |
+
+Both routes have been confirmed on Cyberpunk 2077 by reading pixels back from
+the presented frame rather than by eye.
+
+**Prefer injection where it is available.** An overlay above a full-screen game
+forces it out of direct-to-display scanout, and on Cyberpunk 2077 that collapsed
+the game to single-digit frame rates. Injection adds one pass inside a pipeline
+that was already running: no capture, no second copy of the frame, no extra
+compositing.
+
+### Depth
+
+Neither working route can reach a depth buffer, so ambient occlusion, depth of
+field, and depth fog are out of scope — not omitted, but unavailable.
+
+Both hook at presentation, and by then the game has discarded its depth buffer:
+it exists only as an intermediate during the render pass, used for the game's own
+lighting and effects, and is gone by the time a finished colour image reaches the
+screen. Reaching it would mean hooking inside the render pass and identifying
+which of the many textures a frame binds is depth — per-game reverse engineering
+that a patch can invalidate.
 
 Whether injection is possible is a property of the game's code signature, and
 it varies. On one machine's Steam library:
@@ -76,6 +96,28 @@ be re-approved in System Settings after each build. Pass
 On first run, grant **Screen Recording** permission to MetalShade, then quit
 and relaunch it. The app captures the first visible window owned by the bundle
 identifier. Its menu-bar icon is `MS`; it never appears in the Dock.
+
+## Running a game with injection
+
+Open MetalShade and press **Launch injected** next to a detected game whose
+signature permits it. MetalShade starts the game with its payload loaded, and
+every effect then applies **live** — the launch environment is fixed once a game
+starts, so the app writes a settings file the payload polls.
+
+Adjust with the global shortcuts while playing. Clicking the control panel takes
+focus from the game, and most games pause when that happens:
+
+```text
+⌘⌥↑ / ⌘⌥↓   intensity      ⌘⌥→   effect
+⌘⌥O          bypass         ⌘⌥Q   quit
+```
+
+Injection and the overlay are alternatives, not layers. Starting an injected
+session stops any capture first; running both would process every frame twice.
+
+[docs/INJECTION.md](docs/INJECTION.md) covers the entitlements a game needs, the
+Steam launch-options form, running from the command line, and the cautions —
+single-player only, back up saves, re-check after a game update.
 
 ## Control panel
 
@@ -138,12 +180,28 @@ The default global shortcuts, supplied by the MIT-licensed
 - Command-Option-Q — quit MetalShade from anywhere. The overlay draws above the
   menu bar, so this is the reliable way out if it is ever mispositioned.
 
-### Effects and assets
+### Effects
 
-Exactly two effect shaders are included:
+All of these are colour operations on a finished frame, which is what makes them
+reproducible without depth. They run in the injection route today, and are
+defined in one file, [`Resources/EffectChain.metal`](Resources/EffectChain.metal),
+installed alongside the editable shader.
 
-1. CAS-style adaptive sharpening.
-2. Standard 3D `.cube` LUT colour grading.
+| Stage | |
+|---|---|
+| Sharpen | contrast-adaptive, so edges do not ring |
+| Clarity | wide-radius unsharp on luminance — lifts midtone structure rather than edges |
+| Bloom | bright pass plus separable Gaussian at quarter resolution |
+| Filmic tone | Uncharted 2 curve, normalised so white stays white |
+| Exposure, gamma, vibrance | |
+| Brightness, contrast, saturation, temperature | |
+| 3D `.cube` LUT | |
+
+Nothing is encoded at all when every stage is neutral, so an idle session costs
+the game nothing.
+
+The overlay renderer still compiles its own older shader covering sharpening and
+LUT grading only; moving it onto the shared chain is outstanding.
 
 Drop a LUT on the control panel to load it; an
 [identity example](Examples/Identity.cube) is included. Shader source is
@@ -159,8 +217,9 @@ leave the last valid pipeline active and are written to Console.
 
 ## Screenshots
 
-**None yet.** MetalShade has not been validated against a running game, so
-there is nothing honest to show. Before/after images will be added once real
+**None yet.** Both routes have been confirmed working on Cyberpunk 2077 by
+reading pixels back from the presented frame, but no before/after pair has been
+captured. Before/after images will be added once real
 captures exist; they will be two frames of the same scene from the actual game,
 one with effects bypassed and one processed — not mock-ups and not an image
 editor imitating the shader.
@@ -201,9 +260,9 @@ stay at zero.
 - Whether in-process injection is possible is determined per game, per
   distribution channel, and potentially per game update. A result is not a
   permanent compatibility promise.
-- An overlay implementation cannot access a game's depth buffer. Depth-based
-  effects such as ambient occlusion, depth of field, and depth fog will not be
-  supported in that mode.
+- Neither working route can access a game's depth buffer, so ambient occlusion,
+  depth of field, and depth fog are unavailable. Both hook at presentation,
+  after the game has discarded depth.
 - MetalShade will contain no telemetry and no network calls, aside from an
   optional future GitHub Releases update check.
 - ScreenCaptureKit requires Screen Recording permission. Protected content,
