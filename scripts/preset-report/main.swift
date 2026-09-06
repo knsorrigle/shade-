@@ -28,14 +28,24 @@ if report.applied.isEmpty {
 }
 
 let colour = report.settings.color
+func show(_ label: String, _ value: Float?, default fallback: String = "unchanged") -> String {
+    value.map { String(format: "%@%.2f", $0 < 0 ? "" : " ", $0) } ?? " \(fallback)"
+}
 print("""
 
 RESULTING STATE:
-  sharpening  \(report.settings.sharpening.map { String(format: "%.2f", $0) } ?? "unchanged")
-  brightness  \(String(format: "%+.2f", colour.brightness))
+  sharpen    \(show("", report.settings.sharpening))
+  clarity    \(show("", report.settings.clarity))
+  filmic tone\(show("", report.settings.tone))
+  bloom      \(show("", report.settings.bloom))
+  threshold  \(show("", report.settings.bloomThreshold))
+  exposure   \(show("", report.settings.exposure))
+  gamma      \(show("", report.settings.gamma))
+  vibrance   \(show("", report.settings.vibrance))
+  brightness \(String(format: "%+.2f", colour.brightness))
   contrast    \(String(format: "%.2f", colour.contrast))
   saturation  \(String(format: "%.2f", colour.saturation))
-  temperature \(String(format: "%+.2f", colour.temperature))
+  temperature\(String(format: "%+.2f", colour.temperature))
 """)
 
 if !report.skipped.isEmpty {

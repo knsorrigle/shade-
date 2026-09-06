@@ -257,10 +257,16 @@ final class AppModel: ObservableObject {
         if !appendNotes { importNotes = [] }
         do {
             let report = try ReShadePreset.importPreset(at: item.url)
-            if let sharpening = report.settings.sharpening {
-                intensity = sharpening
-                effect = .cas
-            }
+            // Only stages the preset actually specifies are changed; the rest
+            // keep whatever the user has set.
+            if let sharpening = report.settings.sharpening { intensity = sharpening }
+            if let value = report.settings.clarity { clarity = value }
+            if let value = report.settings.tone { tone = value }
+            if let value = report.settings.bloom { bloom = value }
+            if let value = report.settings.bloomThreshold { bloomThreshold = value }
+            if let value = report.settings.exposure { exposure = value }
+            if let value = report.settings.gamma { gamma = value }
+            if let value = report.settings.vibrance { vibrance = value }
             color = report.settings.color
             activePreset = item
 

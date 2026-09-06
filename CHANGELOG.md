@@ -32,6 +32,13 @@ minor version may carry breaking changes.
 
 ### Changed
 
+- The ReShade importer maps bloom (`AmbientLight`, `Bloom`, `MagicBloom`),
+  filmic tone (`FilmicPass.Strength`) and local contrast (`LocalContrastCS`),
+  which it previously reported as unsupported. On the preset that motivated
+  this, applied settings go from 6 to 13.
+- Where two effects write the same parameter, values compose rather than the
+  last one winning, so a result no longer depends on section order in the file.
+
 - The overlay renderer compiles `EffectChain.metal`, the same file the injected
   payload compiles. Both routes now run one shader, so bloom, filmic tone,
   clarity, exposure, gamma and vibrance are available under either, and editing
