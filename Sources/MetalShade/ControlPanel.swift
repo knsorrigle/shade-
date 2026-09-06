@@ -393,10 +393,15 @@ final class ControlPanelWindowController {
 
     func show() {
         if window == nil {
-            let window = NSWindow(
+            // A non-activating panel: adjusting a slider must not pull focus away
+            // from the game, which pauses when it loses focus.
+            let window = NSPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 440, height: 620),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel],
                 backing: .buffered, defer: false)
+            window.isFloatingPanel = true
+            window.becomesKeyOnlyIfNeeded = true
+            window.hidesOnDeactivate = false
             window.title = "MetalShade"
             // Above the overlay's .screenSaver level. The overlay covers every
             // window on the display, so at any lower level the controls that stop
@@ -407,9 +412,14 @@ final class ControlPanelWindowController {
             window.center()
             self.window = window
         }
-        // The app is an accessory (no Dock icon), so it must activate itself for
-        // the window to come forward and accept keyboard input.
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        // Only steal focus when nothing is being captured. Activating while a
+        // game is running deactivates it, and many games pause when they lose
+        // focus — which looks exactly like a frozen overlay.
+        if model.activeTarget == nil {
+            NSApp.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFrontRegardless()
+        }
     }
 }
