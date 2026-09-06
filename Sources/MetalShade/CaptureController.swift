@@ -74,6 +74,31 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             let overlay = try await MainActor.run { try OverlayWindow(renderer: self.renderer, captureFrame: window.frame) }
             self.overlay = overlay
 
+            // A window that covers a whole display is a full-screen game. Capturing
+            // the display instead of the window is far more reliable there:
+            // window capture of a surface on another Space frequently delivers
+            // nothing. Our own app is excluded from the filter, which also makes
+            // an overlay-feedback loop impossible.
+            let display = content.displays.first { $0.frame.contains(window.frame) }
+                ?? content.displays.first
+            let coversDisplay = display.map { d in
+                window.frame.width >= d.frame.width - 2 && window.frame.height >= d.frame.height - 2
+            } ?? false
+
+            let filter: SCContentFilter
+            if coversDisplay, let display {
+                let selfBundleID = Bundle.main.bundleIdentifier
+                let excluded = content.applications.filter { $0.bundleIdentifier == selfBundleID }
+                filter = SCContentFilter(display: display,
+                                         excludingApplications: excluded,
+                                         exceptingWindows: [])
+                Diagnostics.log("window covers the display; capturing display \(display.displayID) "
+                    + "\(Int(display.frame.width))x\(Int(display.frame.height)), excluding self")
+            } else {
+                filter = SCContentFilter(desktopIndependentWindow: window)
+                Diagnostics.log("capturing the window directly")
+            }
+
             let configuration = SCStreamConfiguration()
             configuration.width = max(1, Int(window.frame.width * 2))
             configuration.height = max(1, Int(window.frame.height * 2))
@@ -83,7 +108,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             configuration.showsCursor = false
             configuration.capturesAudio = false
 
-            let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration, delegate: self)
+            let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "io.metalshade.capture", qos: .userInteractive))
             self.stream = stream
             try await stream.startCapture()
