@@ -18,10 +18,13 @@ struct VertexOut { float4 position [[position]]; float2 uv; };
 // about alignment. Metal pads float3 to 16 bytes, which has already caused one
 // silent bug here.
 struct Uniforms {
-    float4 a;       // x sharpen, y clarity, z tone, w bloom intensity
-    float4 b;       // x bloom threshold, y exposure, z gamma, w vibrance
-    float4 colour;  // brightness, contrast, saturation, temperature
-    float4 tint;    // rgb tint colour, w enabled
+    float4 a;         // x sharpen, y clarity, z tone, w bloom intensity
+    float4 b;         // x bloom threshold, y exposure, z gamma, w vibrance
+    float4 colour;    // brightness, contrast, saturation, temperature
+    float4 tint;      // rgb tint colour, w enabled
+    float4 lut;       // x mix
+    float4 domainMin; // LUT input domain
+    float4 domainMax;
 };
 
 struct BlurParams { float4 direction; };  // xy = step in UV space
@@ -145,6 +148,12 @@ fragment float4 compositeFragment(VertexOut in [[stage_in]],
     if (u.a.w > 0.0) { c += bloom.sample(s, in.uv).rgb * u.a.w; }
     c = applyTone(c, u.a.z);
     c = applyGrade(c, u);
+
+    if (u.lut.x > 0.0) {
+        float3 span = max(u.domainMax.xyz - u.domainMin.xyz, float3(0.0001));
+        float3 coord = clamp((c - u.domainMin.xyz) / span, 0.0, 1.0);
+        c = mix(c, lut.sample(s, coord).rgb, u.lut.x);
+    }
 
     if (u.tint.w > 0.5) { c = mix(c, u.tint.rgb, 0.75); }
     return float4(clamp(c, 0.0, 1.0), 1.0);

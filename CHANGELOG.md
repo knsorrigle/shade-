@@ -30,6 +30,13 @@ minor version may carry breaking changes.
   it. Every apparent freeze so far has been the game's own pause menu, shown
   because it lost focus to the control panel.
 
+### Changed
+
+- The overlay renderer compiles `EffectChain.metal`, the same file the injected
+  payload compiles. Both routes now run one shader, so bloom, filmic tone,
+  clarity, exposure, gamma and vibrance are available under either, and editing
+  the installed copy changes both.
+
 ### Added
 
 - The capture target is chosen in the window. The panel lists games found in the

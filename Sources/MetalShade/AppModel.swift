@@ -90,13 +90,21 @@ final class AppModel: ObservableObject {
     /// screen at all", which no subtle effect can.
     // Depth-free stages. None of these need a depth buffer, so they run
     // identically under the overlay and under injection.
-    @Published var clarity: Float = 0 { didSet { pushInjectionSettings() } }
-    @Published var tone: Float = 0 { didSet { pushInjectionSettings() } }
-    @Published var bloom: Float = 0 { didSet { pushInjectionSettings() } }
-    @Published var bloomThreshold: Float = 0.8 { didSet { pushInjectionSettings() } }
-    @Published var exposure: Float = 0 { didSet { pushInjectionSettings() } }
-    @Published var gamma: Float = 1 { didSet { pushInjectionSettings() } }
-    @Published var vibrance: Float = 0 { didSet { pushInjectionSettings() } }
+    @Published var clarity: Float = 0 { didSet { pushStages() } }
+    @Published var tone: Float = 0 { didSet { pushStages() } }
+    @Published var bloom: Float = 0 { didSet { pushStages() } }
+    @Published var bloomThreshold: Float = 0.8 { didSet { pushStages() } }
+    @Published var exposure: Float = 0 { didSet { pushStages() } }
+    @Published var gamma: Float = 1 { didSet { pushStages() } }
+    @Published var vibrance: Float = 0 { didSet { pushStages() } }
+
+    /// Both routes compile the same chain, so both take the same values.
+    private func pushStages() {
+        renderer?.setStages(clarity: clarity, tone: tone, bloom: bloom,
+                            bloomThreshold: bloomThreshold, exposure: exposure,
+                            gamma: gamma, vibrance: vibrance)
+        pushInjectionSettings()
+    }
 
     func resetEffects() {
         clarity = 0; tone = 0; bloom = 0; bloomThreshold = 0.8
@@ -327,6 +335,7 @@ final class AppModel: ObservableObject {
     }
 
     private func pushAll() {
+        pushStages()
         renderer?.setEffectsEnabled(effectsEnabled)
         renderer?.setEffect(effect)
         renderer?.setIntensity(intensity)

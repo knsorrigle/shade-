@@ -183,9 +183,9 @@ The default global shortcuts, supplied by the MIT-licensed
 ### Effects
 
 All of these are colour operations on a finished frame, which is what makes them
-reproducible without depth. They run in the injection route today, and are
-defined in one file, [`Resources/EffectChain.metal`](Resources/EffectChain.metal),
-installed alongside the editable shader.
+reproducible without depth. **Both routes compile the same file**,
+[`Sources/MetalShade/Resources/EffectChain.metal`](Sources/MetalShade/Resources/EffectChain.metal),
+so an edit reaches whichever route a game happens to use.
 
 | Stage | |
 |---|---|
@@ -200,15 +200,13 @@ installed alongside the editable shader.
 Nothing is encoded at all when every stage is neutral, so an idle session costs
 the game nothing.
 
-The overlay renderer still compiles its own older shader covering sharpening and
-LUT grading only; moving it onto the shared chain is outstanding.
 
 Drop a LUT on the control panel to load it; an
 [identity example](Examples/Identity.cube) is included. Shader source is
 created on first run at:
 
 ```text
-~/Library/Application Support/MetalShade/Shaders/MetalShadeEffects.metal
+~/Library/Application Support/MetalShade/Shaders/EffectChain.metal
 ```
 
 Save edits to this file to hot-reload both Metal pipelines. Compilation errors
