@@ -518,6 +518,7 @@ static id<MTLRenderPipelineState> gDepthView = nil;
 /// same texture in the same command buffer reads real values — the contents are
 /// resolvable but not sampleable as bound. Copying first makes them ours to read.
 static id<MTLTexture> gDepthCopy = nil;
+static void PrintDepthThumbnail(id<MTLCommandBuffer> commandBuffer);
 
 /// Distinguishes scene depth from the other depth targets a frame produces.
 ///
@@ -530,9 +531,11 @@ static BOOL LooksLikeSceneDepth(id<MTLTexture> depth, id<MTLTexture> colour) {
     if (depth.width == depth.height) { return NO; }          // square: a shadow map
     if (depth.width != colour.width || depth.height != colour.height) { return NO; }
     if (depth.width < 640 || depth.height < 360) { return NO; }  // too small to be the scene
-    // Depth32Float_Stencil8 needs a texture view to sample the depth plane
-    // alone, which is a complication worth avoiding while establishing this.
-    return depth.pixelFormat == MTLPixelFormatDepth32Float;
+    // Depth32Float_Stencil8 is the usual main scene depth buffer. Excluding it
+    // as awkward to sample was a mistake: the plain Depth32Float targets at the
+    // same size hold a two-valued mask, not a depth gradient.
+    return depth.pixelFormat == MTLPixelFormatDepth32Float
+        || depth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
 }
 
 static NSString *DescribeUsage(MTLTextureUsage usage) {
@@ -562,8 +565,10 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
                     // Size alone cannot tell a populated scene depth from a
                     // pre-pass target that is still cleared; the survey below
                     // reads them instead.
-                    if (LooksLikeSceneDepth(depth, colour)
-                        && (!gSceneDepth || depth.width > gSceneDepth.width)) {
+                    BOOL preferable = !gSceneDepth
+                        || (depth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8
+                            && gSceneDepth.pixelFormat != MTLPixelFormatDepth32Float_Stencil8);
+                    if (LooksLikeSceneDepth(depth, colour) && preferable) {
                         gSceneDepth = depth;
                         NSString *key = [NSString stringWithFormat:@"%lux%lu",
                                          (unsigned long)depth.width, (unsigned long)depth.height];
@@ -705,8 +710,12 @@ static void SurveyDepthCandidates(id<MTLCommandBuffer> commandBuffer) {
 
     for (id<MTLTexture> depth in candidates) {
         if (depth.pixelFormat != MTLPixelFormatDepth32Float
-            && depth.pixelFormat != MTLPixelFormatDepth16Unorm) { continue; }
-        BOOL isFloat = depth.pixelFormat == MTLPixelFormatDepth32Float;
+            && depth.pixelFormat != MTLPixelFormatDepth16Unorm
+            && depth.pixelFormat != MTLPixelFormatDepth32Float_Stencil8) { continue; }
+        // A blit from a combined depth-stencil texture yields 8 bytes per pixel;
+        // reading it as float pairs takes the depth component.
+        BOOL isFloat = depth.pixelFormat != MTLPixelFormatDepth16Unorm;
+        BOOL isCombined = depth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
 
         MTLTextureDescriptor *descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth.pixelFormat
@@ -733,7 +742,12 @@ static void SurveyDepthCandidates(id<MTLCommandBuffer> commandBuffer) {
         id<MTLTexture> probeSource = depth;
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull done) {
             float values[9] = {0};
-            if (isFloat) {
+            if (isCombined) {
+                struct { float depth; uint8_t stencil; uint8_t pad[3]; } combined[9] = {0};
+                [probe getBytes:combined bytesPerRow:3 * sizeof(combined[0])
+                     fromRegion:MTLRegionMake2D(0, 0, 3, 3) mipmapLevel:0];
+                for (int i = 0; i < 9; ++i) { values[i] = combined[i].depth; }
+            } else if (isFloat) {
                 [probe getBytes:values bytesPerRow:3 * sizeof(float)
                      fromRegion:MTLRegionMake2D(0, 0, 3, 3) mipmapLevel:0];
             } else {
@@ -825,12 +839,62 @@ static BOOL DrawDepthView(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable
         MSLog(@"survey %d at frame %llu, depth storage=%lu", surveys, frame,
               (unsigned long)depth.storageMode);
         SurveyDepthCandidates(commandBuffer);
-        // Read the drawable at the same moment as the survey, so what the shader
-        // wrote is comparable with what the blit read. Comparing a frame-zero
-        // loading screen against a later survey proved nothing.
-        VerifyOutput(commandBuffer, target);
+        PrintDepthThumbnail(commandBuffer);
     }
     return YES;
+}
+
+/// Renders the depth copy small and prints it as text.
+///
+/// Nine sampled points cannot distinguish a depth gradient from a two-valued
+/// mask, and judging a full-screen image by eye cannot either. A coarse picture
+/// in the log can: real scene depth shows a continuum and recognisable
+/// silhouettes, a mask shows blocks.
+static id<MTLTexture> gThumbnail = nil;
+
+static void PrintDepthThumbnail(id<MTLCommandBuffer> commandBuffer) {
+    const NSUInteger width = 48, height = 24;
+    if (!gThumbnail) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                               width:width height:height
+                                                           mipmapped:NO];
+        descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModeShared;
+        gThumbnail = [gDepthCopy.device newTextureWithDescriptor:descriptor];
+        if (!gThumbnail) { return; }
+    }
+    if (!gDepthView || !gDepthCopy) { return; }
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = gThumbnail;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:gDepthView];
+    [encoder setFragmentTexture:gDepthCopy atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull done) {
+        uint8_t pixels[24 * 48 * 4];
+        [gThumbnail getBytes:pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        const char *ramp = " .:-=+*#%@";
+        NSMutableString *picture = [NSMutableString stringWithString:@"\n"];
+        NSMutableSet<NSNumber *> *distinct = [NSMutableSet set];
+        for (NSUInteger y = 0; y < height; ++y) {
+            NSMutableString *row = [NSMutableString string];
+            for (NSUInteger x = 0; x < width; ++x) {
+                uint8_t value = pixels[(y * width + x) * 4 + 1];  // green channel
+                [distinct addObject:@(value)];
+                [row appendFormat:@"%c", ramp[(value * 9) / 255]];
+            }
+            [picture appendFormat:@"  |%@|\n", row];
+        }
+        MSLog(@"depth thumbnail (%lu distinct values across %lu pixels):%@",
+              (unsigned long)distinct.count, (unsigned long)(width * height), picture);
+    }];
 }
 
 #pragma mark - Entry point
