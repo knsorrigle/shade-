@@ -14,8 +14,30 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "$0")/.." && pwd -P)"
 payload="$project_dir/dist/libMetalShadeInject.dylib"
 
+tint=0
+intensity=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --tint) tint=1; shift ;;
+        --intensity)
+            [[ $# -ge 2 ]] || { echo "error: --intensity needs a value 0-1" >&2; exit 2; }
+            intensity="$2"; shift 2 ;;
+        --) shift; break ;;
+        -*) echo "error: unknown option '$1'" >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+
 if [[ $# -lt 1 ]]; then
-    echo "usage: $(basename "$0") <Game.app | executable> [args...]" >&2
+    cat >&2 <<'USAGE'
+usage: inject.sh [--tint] [--intensity 0-1] <Game.app | executable> [args...]
+
+  --tint            paint frames green, to confirm processing is live
+  --intensity N     sharpening strength, 0 to 1
+
+Effects are off unless asked for, so injecting alone changes nothing.
+USAGE
     exit 2
 fi
 
@@ -76,7 +98,17 @@ MSG
     echo "==> Target is hardened but permits injection."
 fi
 
+settings=()
+[[ "$tint" == "1" ]] && settings+=("METALSHADE_TINT=1")
+[[ -n "$intensity" ]] && settings+=("METALSHADE_INTENSITY=$intensity")
+
 echo "==> Payload: $payload"
+if [[ ${#settings[@]} -eq 0 ]]; then
+    echo "==> Effects: none — the payload will load and hook but change nothing."
+    echo "    Add --tint or --intensity N to see an effect."
+else
+    echo "==> Effects: ${settings[*]}"
+fi
 echo "==> Launching: $executable"
 echo "    Log: ~/Library/Application Support/MetalShade/inject.log"
-exec env DYLD_INSERT_LIBRARIES="$payload" "$executable" "$@"
+exec env "${settings[@]}" DYLD_INSERT_LIBRARIES="$payload" "$executable" "$@"
