@@ -307,6 +307,9 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
 
 static IMP gOriginalNextDrawable = NULL;
 static IMP gOriginalPresentDrawable = NULL;
+static IMP gOriginalPresentAfter = NULL;
+static IMP gOriginalPresentAt = NULL;
+static IMP gOriginalDrawablePresent = NULL;
 static pthread_once_t gReportOnce = PTHREAD_ONCE_INIT;
 static pthread_once_t gProcessOnce = PTHREAD_ONCE_INIT;
 
@@ -360,20 +363,59 @@ static id<CAMetalDrawable> MS_nextDrawable(id self, SEL _cmd) {
     return drawable;
 }
 
-static void MS_presentDrawable(id self, SEL _cmd, id<CAMetalDrawable> drawable) {
+/// Shared by every present variant. Metal offers four ways to show a frame and
+/// engines differ in which they use, so hooking only one works by luck.
+static void ProcessIfWanted(id commandBuffer, id<CAMetalDrawable> drawable) {
     if (!gDisabled && drawable && HasVisibleEffect()) {
         // Never let a fault here take the game down: fall through to an
         // unmodified present and stop trying.
         @try {
-            ProcessDrawable((id<MTLCommandBuffer>)self, drawable);
+            ProcessDrawable((id<MTLCommandBuffer>)commandBuffer, drawable);
             pthread_once(&gProcessOnce, ReportFirstProcessed);
-            VerifyOutput((id<MTLCommandBuffer>)self, drawable.texture);
+            VerifyOutput((id<MTLCommandBuffer>)commandBuffer, drawable.texture);
         } @catch (NSException *exception) {
             gDisabled = YES;
             MSLog(@"post-process disabled after exception: %@", exception.reason);
         }
     }
+}
+
+static void MS_presentDrawable(id self, SEL _cmd, id<CAMetalDrawable> drawable) {
+    ProcessIfWanted(self, drawable);
     ((void (*)(id, SEL, id))gOriginalPresentDrawable)(self, _cmd, drawable);
+}
+
+static void MS_presentAfter(id self, SEL _cmd, id<CAMetalDrawable> drawable, CFTimeInterval duration) {
+    ProcessIfWanted(self, drawable);
+    ((void (*)(id, SEL, id, CFTimeInterval))gOriginalPresentAfter)(self, _cmd, drawable, duration);
+}
+
+static void MS_presentAt(id self, SEL _cmd, id<CAMetalDrawable> drawable, CFTimeInterval time) {
+    ProcessIfWanted(self, drawable);
+    ((void (*)(id, SEL, id, CFTimeInterval))gOriginalPresentAt)(self, _cmd, drawable, time);
+}
+
+/// The direct path, where a game presents the drawable itself rather than
+/// scheduling it on a command buffer. There is no command buffer to encode into,
+/// so one is created on the drawable's own device and committed before the
+/// original present runs.
+static void MS_drawablePresent(id self, SEL _cmd) {
+    id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)self;
+    if (!gDisabled && HasVisibleEffect() && drawable.texture) {
+        @try {
+            static id<MTLCommandQueue> queue = nil;
+            if (!queue) { queue = [drawable.texture.device newCommandQueue]; }
+            id<MTLCommandBuffer> buffer = [queue commandBuffer];
+            ProcessDrawable(buffer, drawable);
+            [buffer commit];
+            [buffer waitUntilCompleted];
+            pthread_once(&gProcessOnce, ReportFirstProcessed);
+        } @catch (NSException *exception) {
+            gDisabled = YES;
+            MSLog(@"post-process disabled after exception: %@", exception.reason);
+        }
+    }
+    ((void (*)(id, SEL))gOriginalDrawablePresent)(self, _cmd);
 }
 
 static void InstallDrawableHook(void) {
@@ -399,6 +441,32 @@ static void InstallPresentHookFromDevice(id<MTLDevice> device) {
     gOriginalPresentDrawable = method_getImplementation(method);
     method_setImplementation(method, (IMP)MS_presentDrawable);
     MSLog(@"hooked -[%@ presentDrawable:]", NSStringFromClass(bufferClass));
+
+    // The paced variants, used by engines that control their own frame timing.
+    Method after = class_getInstanceMethod(bufferClass, @selector(presentDrawable:afterMinimumDuration:));
+    if (after) {
+        gOriginalPresentAfter = method_getImplementation(after);
+        method_setImplementation(after, (IMP)MS_presentAfter);
+        MSLog(@"hooked presentDrawable:afterMinimumDuration:");
+    }
+    Method at = class_getInstanceMethod(bufferClass, @selector(presentDrawable:atTime:));
+    if (at) {
+        gOriginalPresentAt = method_getImplementation(at);
+        method_setImplementation(at, (IMP)MS_presentAt);
+        MSLog(@"hooked presentDrawable:atTime:");
+    }
+}
+
+/// CAMetalDrawable is a protocol; its concrete class is private, so it is found
+/// from a drawable a layer hands out rather than by name.
+static void InstallDirectPresentHook(void) {
+    Class drawableClass = objc_getClass("CAMetalDrawable");
+    if (!drawableClass) { return; }
+    Method method = class_getInstanceMethod(drawableClass, @selector(present));
+    if (!method) { MSLog(@"CAMetalDrawable has no -present to hook"); return; }
+    gOriginalDrawablePresent = method_getImplementation(method);
+    method_setImplementation(method, (IMP)MS_drawablePresent);
+    MSLog(@"hooked -[CAMetalDrawable present]");
 }
 
 #pragma mark - Entry point
@@ -419,5 +487,6 @@ static void MetalShadeInjectInit(void) {
         StartSettingsPolling();
         InstallDrawableHook();
         if (device) { InstallPresentHookFromDevice(device); }
+        InstallDirectPresentHook();
     }
 }
