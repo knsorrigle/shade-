@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "MetalShade",
-            dependencies: ["KeyboardShortcuts"]
+            dependencies: ["KeyboardShortcuts"],
+            // The effect chain both routes compile. Shipped as a resource so it
+            // resolves identically from a development build and an app bundle.
+            resources: [.process("Resources/EffectChain.metal")]
         ),
         .target(
             name: "MetalShadeInject",

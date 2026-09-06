@@ -70,10 +70,13 @@ static NSURL *SettingsURL(void) {
 }
 
 typedef struct {
-    float a[4];       // sharpen, clarity, tone, bloom intensity
-    float b[4];       // bloom threshold, exposure, gamma, vibrance
-    float colour[4];  // brightness, contrast, saturation, temperature
-    float tint[4];    // rgb, enabled
+    float a[4];          // sharpen, clarity, tone, bloom intensity
+    float b[4];          // bloom threshold, exposure, gamma, vibrance
+    float colour[4];     // brightness, contrast, saturation, temperature
+    float tint[4];       // rgb, enabled
+    float lut[4];        // x mix — the payload binds an identity, so kept at 0
+    float domainMin[4];
+    float domainMax[4];
 } MSUniforms;
 
 typedef struct { float direction[4]; } MSBlurParams;
@@ -260,6 +263,9 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
         { gBloomThreshold, gExposure, gGamma, gVibrance },
         { gBrightness, gContrast, gSaturation, gTemperature },
         { 0, 1, 0, gTint ? 1.0f : 0.0f },
+        { 0, 0, 0, 0 },
+        { 0, 0, 0, 0 },
+        { 1, 1, 1, 0 },
     };
 
     // A texture cannot be read and written in one pass, so the frame goes to

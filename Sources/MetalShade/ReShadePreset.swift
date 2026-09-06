@@ -9,6 +9,13 @@ struct BasicColor: Sendable, Equatable {
 
 struct PresetSettings: Sendable {
     var sharpening: Float?
+    var clarity: Float?
+    var tone: Float?
+    var bloom: Float?
+    var bloomThreshold: Float?
+    var exposure: Float?
+    var gamma: Float?
+    var vibrance: Float?
     var color = BasicColor()
 }
 
@@ -44,10 +51,17 @@ enum ReShadePreset {
 
     private enum Parameter {
         case sharpening
+        case clarity
+        case tone
+        case bloom
+        case bloomThreshold
         case brightness
         case contrast
         case saturation
         case temperature
+        case exposure
+        case gamma
+        case vibrance
     }
 
     /// How a preset's stored number maps onto our uniform.
@@ -57,14 +71,36 @@ enum ReShadePreset {
         /// ReShade stores an offset around neutral; our uniform is a multiplier
         /// around 1.
         case offsetAroundOne
+        /// Ranges differ between shaders. The divisor brings a shader's own
+        /// range into ours, and is a judgement rather than a published mapping.
+        case divided(by: Float)
+    }
+
+    /// What happens when more than one effect writes the same parameter.
+    ///
+    /// ReShade runs its effects in sequence, so two shaders each adjusting
+    /// saturation compose. Taking the last one seen instead would make the
+    /// result depend on section order in the file.
+    private enum Composition {
+        /// Multipliers around 1 compose by multiplying.
+        case multiply
+        /// Offsets around 0 compose by adding.
+        case add
+        /// Strengths do not stack: two sharpening passes are not twice as sharp.
+        case strongest
+        /// A threshold has no meaningful composition; the last one wins.
+        case replace
     }
 
     private struct Mapping {
         let parameter: Parameter
         let scale: Scale
-        init(_ parameter: Parameter, _ scale: Scale = .direct) {
+        let composition: Composition
+        init(_ parameter: Parameter, _ scale: Scale = .direct,
+             _ composition: Composition = .replace) {
             self.parameter = parameter
             self.scale = scale
+            self.composition = composition
         }
     }
 
@@ -82,29 +118,68 @@ enum ReShadePreset {
         "CAS": .partial([
             // CAS's own "Contrast" is its contrast-adaptation term, not a
             // global contrast control, so it is deliberately not read.
-            "SHARPENING": Mapping(.sharpening),
+            "SHARPENING": Mapping(.sharpening, .direct, .strongest),
         ]),
         "LUMASHARPEN": .partial([
-            "SHARP_STRENGTH": Mapping(.sharpening),
+            "SHARP_STRENGTH": Mapping(.sharpening, .direct, .strongest),
         ]),
         "ADAPTIVESHARPEN": .partial([
-            "CURVE_HEIGHT": Mapping(.sharpening),
+            "CURVE_HEIGHT": Mapping(.sharpening, .direct, .strongest),
         ]),
         "QUINT_LIGHTROOM": .partial([
-            "LIGHTROOM_GLOBAL_SATURATION": Mapping(.saturation, .offsetAroundOne),
-            "LIGHTROOM_GLOBAL_CONTRAST": Mapping(.contrast, .offsetAroundOne),
-            "LIGHTROOM_GLOBAL_TEMPERATURE": Mapping(.temperature),
-            "LIGHTROOM_GLOBAL_EXPOSURE": Mapping(.brightness),
+            "LIGHTROOM_GLOBAL_SATURATION": Mapping(.saturation, .offsetAroundOne, .multiply),
+            "LIGHTROOM_GLOBAL_CONTRAST": Mapping(.contrast, .offsetAroundOne, .multiply),
+            "LIGHTROOM_GLOBAL_TEMPERATURE": Mapping(.temperature, .direct, .add),
+            "LIGHTROOM_GLOBAL_EXPOSURE": Mapping(.exposure, .direct, .add),
+            "LIGHTROOM_GLOBAL_GAMMA": Mapping(.gamma, .offsetAroundOne, .multiply),
+            "LIGHTROOM_GLOBAL_VIBRANCE": Mapping(.vibrance, .direct, .add),
         ]),
-        "VIBRANCE": .partial([
-            "VIBRANCE": Mapping(.saturation, .offsetAroundOne),
+
+        // Ambient Light is predominantly a bloom. Its own ranges are much wider
+        // than ours, so the divisors below bring them into range; they are a
+        // judgement, not a published mapping, and the adaptation, lens and dirt
+        // features it also provides are not implemented.
+        "AMBIENTLIGHT": .partial([
+            "ALINT": Mapping(.bloom, .divided(by: 4), .strongest),
+            "ALTHRESHOLD": Mapping(.bloomThreshold, .divided(by: 100)),
         ]),
-        "COLOURFULNESS": .partial([
-            "COLOURFULNESS": Mapping(.saturation, .offsetAroundOne),
+        // Other common bloom shaders.
+        "BLOOM": .partial([
+            "BLOOMINTENSITY": Mapping(.bloom, .direct, .strongest),
+            "BLOOMTHRESHOLD": Mapping(.bloomThreshold, .divided(by: 100)),
+        ]),
+        "MAGICBLOOM": .partial([
+            "FMB_INTENSITY": Mapping(.bloom, .direct, .strongest),
+            "FMB_THRESHOLD": Mapping(.bloomThreshold),
+        ]),
+
+        // FilmicPass is a tone curve. Its Strength is how much of the curve is
+        // applied, which is exactly our tone stage. Its Saturation and Contrast
+        // are offsets applied inside that curve, so only Saturation — whose
+        // offset semantics are unambiguous — is carried across; the rest of the
+        // curve's internals have no equivalent here.
+        "FILMICPASS": .partial([
+            "STRENGTH": Mapping(.tone, .direct, .strongest),
+            "SATURATION": Mapping(.saturation, .offsetAroundOne, .multiply),
         ]),
         "TONEMAP": .partial([
-            "SATURATION": Mapping(.saturation, .offsetAroundOne),
-            "EXPOSURE": Mapping(.brightness),
+            "SATURATION": Mapping(.saturation, .offsetAroundOne, .multiply),
+            "EXPOSURE": Mapping(.exposure, .direct, .add),
+            "GAMMA": Mapping(.gamma, .direct, .multiply),
+        ]),
+
+        // Local contrast, which is our clarity stage.
+        "LOCALCONTRASTCS": .partial([
+            "STRENGTH": Mapping(.clarity, .direct, .strongest),
+        ]),
+        "CLARITY": .partial([
+            "CLARITYSTRENGTH": Mapping(.clarity, .direct, .strongest),
+        ]),
+        "VIBRANCE": .partial([
+            "VIBRANCE": Mapping(.vibrance, .direct, .add),
+        ]),
+        "COLOURFULNESS": .partial([
+            "COLOURFULNESS": Mapping(.saturation, .offsetAroundOne, .multiply),
         ]),
 
         // Known, and knowably impossible here.
@@ -118,9 +193,6 @@ enum ReShadePreset {
         "QUINT_MXAO": .unsupported("ambient occlusion \(depthReason)"),
         "SSAO": .unsupported("ambient occlusion \(depthReason)"),
         "DEPTHHAZE": .unsupported("depth haze \(depthReason)"),
-        "AMBIENTLIGHT": .unsupported("bloom and light adaptation are not implemented"),
-        "FILMICPASS": .unsupported("filmic tone curve is not implemented"),
-        "LOCALCONTRASTCS": .unsupported("local contrast is not implemented"),
     ]
 
     // MARK: - Parsing
@@ -199,26 +271,70 @@ enum ReShadePreset {
     private static func apply(
         _ mapping: Mapping, number: Float, to settings: inout PresetSettings
     ) -> String {
-        let scaled = mapping.scale == .offsetAroundOne ? 1 + number : number
+        let scaled: Float
+        switch mapping.scale {
+        case .direct: scaled = number
+        case .offsetAroundOne: scaled = 1 + number
+        case let .divided(by: divisor): scaled = number / divisor
+        }
+
+        func compose(_ existing: Float?, _ incoming: Float, neutral: Float) -> Float {
+            guard let existing else { return incoming }
+            switch mapping.composition {
+            case .multiply: return (existing / neutral) * (incoming / neutral) * neutral
+            case .add: return existing + incoming - neutral
+            case .strongest: return max(existing, incoming)
+            case .replace: return incoming
+            }
+        }
+
         switch mapping.parameter {
         case .sharpening:
-            let value = clamp(scaled, 0, 1)
+            let value = clamp(compose(settings.sharpening, scaled, neutral: 0), 0, 1)
             settings.sharpening = value
-            return "sharpening \(percent(value))"
+            return "sharpen \(percent(value))"
+        case .clarity:
+            let value = clamp(compose(settings.clarity, scaled, neutral: 0), 0, 1)
+            settings.clarity = value
+            return "clarity \(percent(value))"
+        case .tone:
+            let value = clamp(compose(settings.tone, scaled, neutral: 0), 0, 1)
+            settings.tone = value
+            return "filmic tone \(percent(value))"
+        case .bloom:
+            let value = clamp(compose(settings.bloom, scaled, neutral: 0), 0, 2)
+            settings.bloom = value
+            return "bloom \(twoPlaces(value))"
+        case .bloomThreshold:
+            let value = clamp(scaled, 0, 1)
+            settings.bloomThreshold = value
+            return "bloom threshold \(twoPlaces(value))"
+        case .exposure:
+            let value = clamp(compose(settings.exposure, scaled, neutral: 0), -3, 3)
+            settings.exposure = value
+            return "exposure \(signed(value))"
+        case .gamma:
+            let value = clamp(compose(settings.gamma, scaled, neutral: 1), 0.2, 3)
+            settings.gamma = value
+            return "gamma \(twoPlaces(value))"
+        case .vibrance:
+            let value = clamp(compose(settings.vibrance, scaled, neutral: 0), -1, 1)
+            settings.vibrance = value
+            return "vibrance \(signed(value))"
         case .brightness:
-            let value = clamp(scaled, -1, 1)
+            let value = clamp(compose(settings.color.brightness, scaled, neutral: 0), -1, 1)
             settings.color.brightness = value
             return "brightness \(signed(value))"
         case .contrast:
-            let value = clamp(scaled, 0, 3)
+            let value = clamp(compose(settings.color.contrast, scaled, neutral: 1), 0, 3)
             settings.color.contrast = value
             return "contrast \(twoPlaces(value))"
         case .saturation:
-            let value = clamp(scaled, 0, 3)
+            let value = clamp(compose(settings.color.saturation, scaled, neutral: 1), 0, 3)
             settings.color.saturation = value
             return "saturation \(twoPlaces(value))"
         case .temperature:
-            let value = clamp(scaled, -1, 1)
+            let value = clamp(compose(settings.color.temperature, scaled, neutral: 0), -1, 1)
             settings.color.temperature = value
             return "temperature \(signed(value))"
         }

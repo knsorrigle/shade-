@@ -158,9 +158,17 @@ from effects it recognises — `CAS`, `LumaSharpen`, `AdaptiveSharpen`,
 `qUINT_lightroom`, `Vibrance`, `Colourfulness`, `Tonemap` — and maps them onto
 sharpening, brightness, contrast, saturation, and temperature.
 
-It refuses to guess at the rest, because ReShade key names are scoped to their
-effect: `Saturation` inside `FilmicPass.fx` is an offset within a tone curve,
-not a global saturation multiplier. Everything else is reported, grouped by the
+Recognised effects now include `AmbientLight` and other bloom shaders,
+`FilmicPass` (its `Strength` is how much of the tone curve to apply, which is
+exactly our tone stage), and `LocalContrastCS` for clarity.
+
+Where two effects write the same parameter — as a filmic pass and a grading
+shader both do to saturation — the values compose rather than the last one
+winning, so the result does not depend on section order in the file.
+
+It still refuses to guess at the rest, because ReShade key names are scoped to
+their effect: `Saturation` inside `FilmicPass.fx` is an offset within a tone
+curve, not a global saturation multiplier. Everything else is reported, grouped by the
 effect it came from, with the reason. Depth-based effects — AO, DOF, GI, depth
 fog — can never work here, whatever the preset asks for.
 
@@ -183,9 +191,9 @@ The default global shortcuts, supplied by the MIT-licensed
 ### Effects
 
 All of these are colour operations on a finished frame, which is what makes them
-reproducible without depth. They run in the injection route today, and are
-defined in one file, [`Resources/EffectChain.metal`](Resources/EffectChain.metal),
-installed alongside the editable shader.
+reproducible without depth. **Both routes compile the same file**,
+[`Sources/MetalShade/Resources/EffectChain.metal`](Sources/MetalShade/Resources/EffectChain.metal),
+so an edit reaches whichever route a game happens to use.
 
 | Stage | |
 |---|---|
@@ -200,15 +208,13 @@ installed alongside the editable shader.
 Nothing is encoded at all when every stage is neutral, so an idle session costs
 the game nothing.
 
-The overlay renderer still compiles its own older shader covering sharpening and
-LUT grading only; moving it onto the shared chain is outstanding.
 
 Drop a LUT on the control panel to load it; an
 [identity example](Examples/Identity.cube) is included. Shader source is
 created on first run at:
 
 ```text
-~/Library/Application Support/MetalShade/Shaders/MetalShadeEffects.metal
+~/Library/Application Support/MetalShade/Shaders/EffectChain.metal
 ```
 
 Save edits to this file to hot-reload both Metal pipelines. Compilation errors

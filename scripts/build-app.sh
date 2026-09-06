@@ -72,8 +72,6 @@ cp -R "${resource_bundles[@]}" "$output_dir/Contents/Resources/"
 # not depend on a build directory being present.
 "$project_dir/scripts/build-payload.sh" >/dev/null
 cp "$project_dir/dist/libMetalShadeInject.dylib" "$output_dir/Contents/Resources/"
-# The effect chain both routes compile.
-cp "$project_dir/Resources/EffectChain.metal" "$output_dir/Contents/Resources/"
 
 plist_buddy=/usr/libexec/PlistBuddy
 "$plist_buddy" -c "Set :CFBundleShortVersionString $short_version" "$output_dir/Contents/Info.plist"
@@ -102,6 +100,13 @@ if [[ "$sign_identity" == "-" ]]; then
 fi
 
 for nested in "$output_dir/Contents/Resources"/*.bundle; do
+    # A directory without an Info.plist is not a bundle codesign can seal on its
+    # own; SwiftPM emits one like that for a target's own resources. The outer
+    # app signature covers it as an ordinary resource either way.
+    if [[ ! -f "$nested/Info.plist" ]]; then
+        echo "  (resource directory $(basename "$nested") sealed by the app, not signed separately)"
+        continue
+    fi
     codesign --force --options runtime "${timestamp_flag[@]}" \
         --sign "$sign_identity" "$nested"
 done
