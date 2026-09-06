@@ -5,6 +5,32 @@ import AppKit
 ///
 /// Environment variables configure the payload at launch and cannot change
 /// afterwards, so anything adjustable during play goes through the file.
+/// Everything the payload can be told, in one place. Sent as JSON because the
+/// launch environment is fixed once a game starts.
+struct EffectSettings {
+    var sharpen: Float = 0
+    var clarity: Float = 0
+    var tone: Float = 0
+    var bloom: Float = 0
+    var bloomThreshold: Float = 0.8
+    var exposure: Float = 0
+    var gamma: Float = 1
+    var vibrance: Float = 0
+    var colour = BasicColor()
+    var tint = false
+
+    var json: [String: Any] {
+        [
+            "intensity": sharpen, "clarity": clarity, "tone": tone,
+            "bloom": bloom, "bloomThreshold": bloomThreshold,
+            "exposure": exposure, "gamma": gamma, "vibrance": vibrance,
+            "brightness": colour.brightness, "contrast": colour.contrast,
+            "saturation": colour.saturation, "temperature": colour.temperature,
+            "tint": tint,
+        ]
+    }
+}
+
 enum InjectionLauncher {
     enum LaunchError: LocalizedError {
         case payloadMissing
@@ -38,22 +64,13 @@ enum InjectionLauncher {
         return root.appendingPathComponent("inject-settings.json")
     }
 
-    static func writeSettings(intensity: Float, tint: Bool, colour: BasicColor) {
-        let payload: [String: Any] = [
-            "intensity": intensity,
-            "tint": tint,
-            "brightness": colour.brightness,
-            "contrast": colour.contrast,
-            "saturation": colour.saturation,
-            "temperature": colour.temperature,
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+    static func writeSettings(_ settings: EffectSettings) {
+        guard let data = try? JSONSerialization.data(withJSONObject: settings.json) else { return }
         try? data.write(to: settingsURL, options: .atomic)
     }
 
     @discardableResult
-    static func launch(game: GameLibrary.Game, intensity: Float, tint: Bool,
-                       colour: BasicColor) throws -> Process {
+    static func launch(game: GameLibrary.Game, settings: EffectSettings) throws -> Process {
         guard let payloadURL else { throw LaunchError.payloadMissing }
 
         let plist = game.bundleURL.appendingPathComponent("Contents/Info.plist")
@@ -74,7 +91,7 @@ enum InjectionLauncher {
                 target: targetArch, payload: payloadArchs.joined(separator: ", "))
         }
 
-        writeSettings(intensity: intensity, tint: tint, colour: colour)
+        writeSettings(settings)
 
         var environment = ProcessInfo.processInfo.environment
         environment["DYLD_INSERT_LIBRARIES"] = payloadURL.path

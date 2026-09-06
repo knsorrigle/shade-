@@ -88,6 +88,23 @@ final class AppModel: ObservableObject {
     }
     /// Paints the overlay a solid colour. Answers "is the overlay reaching the
     /// screen at all", which no subtle effect can.
+    // Depth-free stages. None of these need a depth buffer, so they run
+    // identically under the overlay and under injection.
+    @Published var clarity: Float = 0 { didSet { pushInjectionSettings() } }
+    @Published var tone: Float = 0 { didSet { pushInjectionSettings() } }
+    @Published var bloom: Float = 0 { didSet { pushInjectionSettings() } }
+    @Published var bloomThreshold: Float = 0.8 { didSet { pushInjectionSettings() } }
+    @Published var exposure: Float = 0 { didSet { pushInjectionSettings() } }
+    @Published var gamma: Float = 1 { didSet { pushInjectionSettings() } }
+    @Published var vibrance: Float = 0 { didSet { pushInjectionSettings() } }
+
+    func resetEffects() {
+        clarity = 0; tone = 0; bloom = 0; bloomThreshold = 0.8
+        exposure = 0; gamma = 1; vibrance = 0
+        intensity = 0
+        color = BasicColor()
+    }
+
     @Published var diagnosticTint = false {
         didSet {
             renderer?.setDiagnosticTint(diagnosticTint)
@@ -147,14 +164,21 @@ final class AppModel: ObservableObject {
 
     // MARK: - Injection
 
+    private var effectSettings: EffectSettings {
+        EffectSettings(
+            sharpen: intensity, clarity: clarity, tone: tone,
+            bloom: bloom, bloomThreshold: bloomThreshold,
+            exposure: exposure, gamma: gamma, vibrance: vibrance,
+            colour: color, tint: diagnosticTint)
+    }
+
     func launchInjected(_ game: GameLibrary.Game) {
         importNotes = []
         do {
             // Injection processes inside the game; an overlay on top of it would
             // be a second, redundant pass.
             if activeTarget != nil { stopCapture() }
-            let process = try InjectionLauncher.launch(
-                game: game, intensity: intensity, tint: diagnosticTint, colour: color)
+            let process = try InjectionLauncher.launch(game: game, settings: effectSettings)
             injectedProcess = process
             injectedGame = game
             renderMode = .injected
@@ -178,7 +202,7 @@ final class AppModel: ObservableObject {
     /// change while the game runs.
     private func pushInjectionSettings() {
         guard injectedGame != nil else { return }
-        InjectionLauncher.writeSettings(intensity: intensity, tint: diagnosticTint, colour: color)
+        InjectionLauncher.writeSettings(effectSettings)
     }
 
     func stopCapture() {

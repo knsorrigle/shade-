@@ -51,50 +51,14 @@ static void MSLog(NSString *format, ...) {
 
 #pragma mark - Post-process pipeline
 
-// The shader mirrors the overlay's, so both routes produce the same picture.
-static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
-"using namespace metal;\n"
-"struct VertexOut { float4 position [[position]]; float2 uv; };\n"
-"struct Uniforms { float4 params; float4 tint; float4 colour; };\n""// params.x sharpen; colour = brightness, contrast, saturation, temperature\n"
-"vertex VertexOut msVertex(uint id [[vertex_id]]) {\n"
-"  float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };\n"
-"  VertexOut o; o.position = float4(p[id], 0, 1);\n"
-"  o.uv = float2((p[id].x + 1) * 0.5, 1 - (p[id].y + 1) * 0.5); return o; }\n"
-"fragment float4 msFragment(VertexOut in [[stage_in]],\n"
-"                           texture2d<float> src [[texture(0)]],\n"
-"                           constant Uniforms& u [[buffer(0)]]) {\n"
-"  constexpr sampler s(address::clamp_to_edge, filter::linear);\n"
-"  float3 c = src.sample(s, in.uv).rgb;\n"
-"  if (u.tint.w > 0.5) { return float4(mix(c, u.tint.rgb, 0.75), 1); }\n"
-"  float2 px = 1.0 / float2(src.get_width(), src.get_height());\n"
-"  float3 n = src.sample(s, in.uv + float2(0,-px.y)).rgb;\n"
-"  float3 e = src.sample(s, in.uv + float2(px.x,0)).rgb;\n"
-"  float3 w = src.sample(s, in.uv - float2(px.x,0)).rgb;\n"
-"  float3 so = src.sample(s, in.uv + float2(0,px.y)).rgb;\n"
-"  float3 avg = (n + e + w + so) * 0.25;\n"
-"  float range = max(max(c.r,c.g),c.b) - min(min(c.r,c.g),c.b);\n"
-"  float k = u.params.x * (1.0 - smoothstep(0.2, 0.9, range));\n"
-"  c = c + (c - avg) * k;\n"
-"  c += u.colour.x;\n"
-"  c = (c - 0.5) * u.colour.y + 0.5;\n"
-"  float l = dot(c, float3(0.2126, 0.7152, 0.0722));\n"
-"  c = mix(float3(l), c, u.colour.z);\n"
-"  c += u.colour.w * float3(0.05, 0.0, -0.05);\n"
-"  return float4(clamp(c, 0.0, 1.0), 1.0); }\n";
-
-/// Laid out as two float4s so the C and Metal views cannot disagree. Metal
-/// aligns float3 to 16 bytes, so a `{ float; float3; }` pair is not the packed
-/// five floats a C struct would suggest — the earlier layout put the tint flag
-/// where the shader read padding.
-typedef struct { float params[4]; float tint[4]; float colour[4]; } MSUniforms;
-
-static id<MTLRenderPipelineState> gPipeline = nil;
-static id<MTLTexture> gScratch = nil;
-static float gIntensity = 0.0f;
-static BOOL gTint = NO;
-// Neutral: no brightness shift, unit contrast and saturation, no temperature.
-static float gBrightness = 0.0f, gContrast = 1.0f, gSaturation = 1.0f, gTemperature = 0.0f;
-static BOOL gDisabled = NO;
+// The chain lives in one file that both routes compile, so the overlay and the
+// injected payload cannot drift apart. MetalShade installs it here.
+static NSURL *ShaderURL(void) {
+    NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory
+                                                            inDomains:NSUserDomainMask].firstObject;
+    return [[support URLByAppendingPathComponent:@"MetalShade" isDirectory:YES]
+            URLByAppendingPathComponent:@"Shaders/EffectChain.metal"];
+}
 
 /// Path the app writes live settings to. Environment variables are fixed at
 /// launch, so they cannot drive a slider while a game is running.
@@ -105,41 +69,68 @@ static NSURL *SettingsURL(void) {
             URLByAppendingPathComponent:@"inject-settings.json"];
 }
 
+typedef struct {
+    float a[4];       // sharpen, clarity, tone, bloom intensity
+    float b[4];       // bloom threshold, exposure, gamma, vibrance
+    float colour[4];  // brightness, contrast, saturation, temperature
+    float tint[4];    // rgb, enabled
+} MSUniforms;
+
+typedef struct { float direction[4]; } MSBlurParams;
+
+static id<MTLRenderPipelineState> gComposite = nil;
+static id<MTLRenderPipelineState> gBrightPass = nil;
+static id<MTLRenderPipelineState> gBlur = nil;
+static id<MTLTexture> gScratch = nil, gBloomA = nil, gBloomB = nil, gLUT = nil;
+
+static float gSharpen = 0, gClarity = 0, gTone = 0, gBloom = 0, gBloomThreshold = 0.8f;
+static float gExposure = 0, gGamma = 1.0f, gVibrance = 0;
+static float gBrightness = 0, gContrast = 1.0f, gSaturation = 1.0f, gTemperature = 0;
+static BOOL gTint = NO;
+static BOOL gDisabled = NO;
+
+static float ReadNumber(NSDictionary *json, NSString *key, float fallback) {
+    NSNumber *value = json[key];
+    return [value isKindOfClass:[NSNumber class]] ? value.floatValue : fallback;
+}
+
 static void ApplySettingsFile(void) {
     NSData *data = [NSData dataWithContentsOfURL:SettingsURL()];
     if (!data) { return; }
     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if (![json isKindOfClass:[NSDictionary class]]) { return; }
 
-    NSNumber *intensity = json[@"intensity"];
+    gSharpen        = ReadNumber(json, @"intensity", gSharpen);
+    gClarity        = ReadNumber(json, @"clarity", gClarity);
+    gTone           = ReadNumber(json, @"tone", gTone);
+    gBloom          = ReadNumber(json, @"bloom", gBloom);
+    gBloomThreshold = ReadNumber(json, @"bloomThreshold", gBloomThreshold);
+    gExposure       = ReadNumber(json, @"exposure", gExposure);
+    gGamma          = ReadNumber(json, @"gamma", gGamma);
+    gVibrance       = ReadNumber(json, @"vibrance", gVibrance);
+    gBrightness     = ReadNumber(json, @"brightness", gBrightness);
+    gContrast       = ReadNumber(json, @"contrast", gContrast);
+    gSaturation     = ReadNumber(json, @"saturation", gSaturation);
+    gTemperature    = ReadNumber(json, @"temperature", gTemperature);
     NSNumber *tint = json[@"tint"];
-    if ([intensity isKindOfClass:[NSNumber class]]) {
-        gIntensity = fminf(fmaxf(intensity.floatValue, 0.0f), 1.0f);
-    }
-    if ([tint isKindOfClass:[NSNumber class]]) {
-        gTint = tint.boolValue;
-    }
-
-    // Colour grading is most of what a ReShade preset actually contributes;
-    // sharpening alone is close to invisible in motion.
-    NSNumber *brightness = json[@"brightness"];
-    NSNumber *contrast = json[@"contrast"];
-    NSNumber *saturation = json[@"saturation"];
-    NSNumber *temperature = json[@"temperature"];
-    if ([brightness isKindOfClass:[NSNumber class]]) { gBrightness = brightness.floatValue; }
-    if ([contrast isKindOfClass:[NSNumber class]]) { gContrast = contrast.floatValue; }
-    if ([saturation isKindOfClass:[NSNumber class]]) { gSaturation = saturation.floatValue; }
-    if ([temperature isKindOfClass:[NSNumber class]]) { gTemperature = temperature.floatValue; }
+    if ([tint isKindOfClass:[NSNumber class]]) { gTint = tint.boolValue; }
 }
 
-/// True when any stage would change the picture. Nothing is encoded otherwise,
-/// so an idle session costs the game nothing.
-static BOOL HasVisibleEffect(void) {
-    return gTint || gIntensity > 0.0f
-        || fabsf(gBrightness) > 0.001f
-        || fabsf(gContrast - 1.0f) > 0.001f
-        || fabsf(gSaturation - 1.0f) > 0.001f
-        || fabsf(gTemperature) > 0.001f;
+static void ReadSettings(void) {
+    // Environment variables so a Steam launch option can configure this without
+    // a rebuild, and so a bad setting can be removed without touching the game.
+    const char *intensity = getenv("METALSHADE_INTENSITY");
+    if (intensity) { gSharpen = fminf(fmaxf(atof(intensity), 0.0f), 1.0f); }
+    const char *tint = getenv("METALSHADE_TINT");
+    gTint = (tint && atoi(tint) != 0);
+
+    // A settings file, if the app has written one, wins: it is the live channel.
+    ApplySettingsFile();
+    MSLog(@"settings: sharpen %.2f clarity %.2f tone %.2f bloom %.2f | "
+          @"exposure %+.2f gamma %.2f vibrance %+.2f | "
+          @"brightness %+.2f contrast %.2f saturation %.2f temperature %+.2f | tint %@",
+          gSharpen, gClarity, gTone, gBloom, gExposure, gGamma, gVibrance,
+          gBrightness, gContrast, gSaturation, gTemperature, gTint ? @"on" : @"off");
 }
 
 /// Polls rather than watching: the file is tiny, half a second is responsive
@@ -156,64 +147,123 @@ static void StartSettingsPolling(void) {
     MSLog(@"watching %@ for live settings", SettingsURL().path);
 }
 
-static void ReadSettings(void) {
-    // Environment variables so a Steam launch option can configure this without
-    // a rebuild, and so a bad setting can be removed without touching the game.
-    const char *intensity = getenv("METALSHADE_INTENSITY");
-    if (intensity) { gIntensity = fminf(fmaxf(atof(intensity), 0.0f), 1.0f); }
-    const char *tint = getenv("METALSHADE_TINT");
-    gTint = (tint && atoi(tint) != 0);
-    // A settings file, if the app has written one, wins over the launch
-    // environment: it is the live channel.
-    ApplySettingsFile();
-    MSLog(@"settings: intensity %.2f, tint %@, brightness %+.2f contrast %.2f "
-          @"saturation %.2f temperature %+.2f",
-          gIntensity, gTint ? @"on" : @"off",
-          gBrightness, gContrast, gSaturation, gTemperature);
+/// True when any stage would change the picture. Nothing is encoded otherwise,
+/// so an idle session costs the game nothing.
+static BOOL HasVisibleEffect(void) {
+    return gTint || gSharpen > 0.001f || gClarity > 0.001f || gTone > 0.001f || gBloom > 0.001f
+        || fabsf(gExposure) > 0.001f || fabsf(gGamma - 1.0f) > 0.001f
+        || fabsf(gVibrance) > 0.001f || fabsf(gBrightness) > 0.001f
+        || fabsf(gContrast - 1.0f) > 0.001f || fabsf(gSaturation - 1.0f) > 0.001f
+        || fabsf(gTemperature) > 0.001f;
 }
 
-static BOOL EnsurePipeline(id<MTLDevice> device, MTLPixelFormat format) {
-    if (gPipeline) { return YES; }
+static id<MTLRenderPipelineState> MakePipeline(id<MTLDevice> device, id<MTLLibrary> library,
+                                               NSString *fragment, MTLPixelFormat format) {
+    MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
+    descriptor.fragmentFunction = [library newFunctionWithName:fragment];
+    descriptor.colorAttachments[0].pixelFormat = format;
     NSError *error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:kShaderSource options:nil error:&error];
+    id<MTLRenderPipelineState> state =
+        [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!state) { MSLog(@"pipeline '%@' failed: %@", fragment, error); }
+    return state;
+}
+
+static BOOL EnsurePipelines(id<MTLDevice> device, MTLPixelFormat format) {
+    if (gComposite) { return YES; }
+
+    NSString *source = [NSString stringWithContentsOfURL:ShaderURL()
+                                                encoding:NSUTF8StringEncoding error:nil];
+    if (!source) {
+        MSLog(@"no shader at %@ — run MetalShade once so it installs one", ShaderURL().path);
+        return NO;
+    }
+
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
     if (!library) { MSLog(@"shader compile failed: %@", error); return NO; }
 
-    MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
-    descriptor.vertexFunction = [library newFunctionWithName:@"msVertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:@"msFragment"];
-    descriptor.colorAttachments[0].pixelFormat = format;
-    gPipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (!gPipeline) { MSLog(@"pipeline creation failed: %@", error); return NO; }
-    MSLog(@"post-process pipeline ready (%lu)", (unsigned long)format);
+    gComposite  = MakePipeline(device, library, @"compositeFragment", format);
+    gBrightPass = MakePipeline(device, library, @"brightPassFragment", format);
+    gBlur       = MakePipeline(device, library, @"blurFragment", format);
+    if (!gComposite || !gBrightPass || !gBlur) { return NO; }
+
+    // The composite always samples a LUT; a 2x2x2 identity keeps it valid when
+    // none is loaded, rather than leaving an unbound texture to sample.
+    MTLTextureDescriptor *lutDescriptor = [MTLTextureDescriptor new];
+    lutDescriptor.textureType = MTLTextureType3D;
+    lutDescriptor.pixelFormat = MTLPixelFormatRGBA16Float;
+    lutDescriptor.width = lutDescriptor.height = lutDescriptor.depth = 2;
+    lutDescriptor.usage = MTLTextureUsageShaderRead;
+    gLUT = [device newTextureWithDescriptor:lutDescriptor];
+
+    MSLog(@"effect chain compiled from %@", ShaderURL().lastPathComponent);
     return YES;
 }
 
-static BOOL EnsureScratch(id<MTLDevice> device, id<MTLTexture> target) {
+static id<MTLTexture> MakeTarget(id<MTLDevice> device, NSUInteger width, NSUInteger height,
+                                 MTLPixelFormat format) {
+    MTLTextureDescriptor *descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                           width:MAX(width, 1u)
+                                                          height:MAX(height, 1u)
+                                                       mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModePrivate;
+    return [device newTextureWithDescriptor:descriptor];
+}
+
+static BOOL EnsureTextures(id<MTLDevice> device, id<MTLTexture> target) {
     if (gScratch && gScratch.width == target.width && gScratch.height == target.height
         && gScratch.pixelFormat == target.pixelFormat) {
         return YES;
     }
-    MTLTextureDescriptor *descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:target.pixelFormat
-                                                           width:target.width
-                                                          height:target.height
-                                                       mipmapped:NO];
-    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-    descriptor.storageMode = MTLStorageModePrivate;
-    gScratch = [device newTextureWithDescriptor:descriptor];
-    return gScratch != nil;
+    gScratch = MakeTarget(device, target.width, target.height, target.pixelFormat);
+    // Bloom is blurred anyway, so quarter resolution costs nothing visible and a
+    // sixteenth of the work.
+    gBloomA = MakeTarget(device, target.width / 4, target.height / 4, target.pixelFormat);
+    gBloomB = MakeTarget(device, target.width / 4, target.height / 4, target.pixelFormat);
+    return gScratch && gBloomA && gBloomB;
 }
 
-/// Encodes the effect into the game's own command buffer, after everything it
-/// has already encoded and before presentation. Reading and writing one texture
-/// in a single pass is not allowed, so the frame is copied to scratch first.
+static void FullscreenPass(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> destination,
+                           id<MTLRenderPipelineState> pipeline,
+                           NSArray<id<MTLTexture>> *inputs,
+                           const void *uniforms, size_t uniformsSize) {
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = destination;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:pipeline];
+    for (NSUInteger i = 0; i < inputs.count; ++i) {
+        [encoder setFragmentTexture:inputs[i] atIndex:i];
+    }
+    [encoder setFragmentBytes:uniforms length:uniformsSize atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+}
+
+/// Encodes the chain into the game's own command buffer, after everything it has
+/// already encoded and before presentation.
 static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
     id<MTLTexture> target = drawable.texture;
     if (!target) { return; }
     id<MTLDevice> device = target.device;
-    if (!EnsurePipeline(device, target.pixelFormat)) { gDisabled = YES; return; }
-    if (!EnsureScratch(device, target)) { gDisabled = YES; return; }
+    if (!EnsurePipelines(device, target.pixelFormat)) { gDisabled = YES; return; }
+    if (!EnsureTextures(device, target)) { gDisabled = YES; return; }
 
+    MSUniforms uniforms = {
+        { gSharpen, gClarity, gTone, gBloom },
+        { gBloomThreshold, gExposure, gGamma, gVibrance },
+        { gBrightness, gContrast, gSaturation, gTemperature },
+        { 0, 1, 0, gTint ? 1.0f : 0.0f },
+    };
+
+    // A texture cannot be read and written in one pass, so the frame goes to
+    // scratch first and is rendered back from there.
     id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
     [blit copyFromTexture:target sourceSlice:0 sourceLevel:0
              sourceOrigin:MTLOriginMake(0, 0, 0)
@@ -222,23 +272,26 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
 
+    if (gBloom > 0.001f) {
+        FullscreenPass(commandBuffer, gBloomA, gBrightPass, @[gScratch],
+                       &uniforms, sizeof(uniforms));
+        MSBlurParams horizontal = {{ 1.0f / (float)gBloomA.width, 0, 0, 0 }};
+        FullscreenPass(commandBuffer, gBloomB, gBlur, @[gBloomA],
+                       &horizontal, sizeof(horizontal));
+        MSBlurParams vertical = {{ 0, 1.0f / (float)gBloomA.height, 0, 0 }};
+        FullscreenPass(commandBuffer, gBloomA, gBlur, @[gBloomB],
+                       &vertical, sizeof(vertical));
+    }
+
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
-    [encoder setRenderPipelineState:gPipeline];
+    [encoder setRenderPipelineState:gComposite];
     [encoder setFragmentTexture:gScratch atIndex:0];
-    MSUniforms uniforms;
-    uniforms.params[0] = gIntensity;
-    uniforms.params[1] = uniforms.params[2] = uniforms.params[3] = 0;
-    uniforms.tint[0] = 0; uniforms.tint[1] = 1; uniforms.tint[2] = 0;   // green
-    uniforms.tint[3] = gTint ? 1.0f : 0.0f;                              // enabled
-    uniforms.colour[0] = gBrightness;
-    uniforms.colour[1] = gContrast;
-    uniforms.colour[2] = gSaturation;
-    uniforms.colour[3] = gTemperature;
+    [encoder setFragmentTexture:gBloomA ?: gScratch atIndex:1];
+    [encoder setFragmentTexture:gLUT atIndex:2];
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
