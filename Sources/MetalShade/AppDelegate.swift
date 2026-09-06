@@ -95,6 +95,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         capture = nil
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        Diagnostics.log("applicationWillTerminate — the app was asked to quit")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // A menu-bar app outlives its windows. Closing the control panel must not
+        // end the session.
+        Diagnostics.log("applicationShouldTerminateAfterLastWindowClosed asked; answering false")
+        return false
+    }
+
     /// Files opened with MetalShade (`open -a MetalShade preset.ini`) are
     /// imported exactly like a drop onto the control window.
     func application(_ application: NSApplication, open urls: [URL]) {

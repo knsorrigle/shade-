@@ -159,6 +159,15 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func beginTrackingWindow() {
+        // Timer.scheduledTimer installs on the *calling* thread's run loop.
+        // startCapture() runs inside an async Task on a cooperative thread with
+        // no run loop, so timers created there never fire — which is why no
+        // frame-rate line was ever logged and why the overlay never tracked a
+        // moving window.
+        DispatchQueue.main.async { [weak self] in self?.installTrackingTimer() }
+    }
+
+    private func installTrackingTimer() {
         trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { await self.refreshOverlayFrame() }
@@ -176,6 +185,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     /// arriving is otherwise invisible, and it is the first thing worth knowing
     /// when the image does not change.
     private func beginRateReporting() {
+        DispatchQueue.main.async { [weak self] in self?.installRateTimer() }
+    }
+
+    private func installRateTimer() {
         rateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.countLock.lock()
