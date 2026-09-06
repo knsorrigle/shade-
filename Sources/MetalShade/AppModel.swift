@@ -18,7 +18,7 @@ final class AppModel: ObservableObject {
     /// What the app is currently doing, so the panel can say when the effect
     /// controls are not connected to anything.
     enum RenderMode: Sendable {
-        case idle, selfTest, capturing
+        case idle, selfTest, capturing, injected
 
         var explanation: String? {
             switch self {
@@ -28,6 +28,8 @@ final class AppModel: ObservableObject {
                 return "Self-test draws a fixed calibration border and runs no shader. Effect and colour changes below are stored but will not alter anything on screen."
             case .capturing:
                 return nil
+            case .injected:
+                return "Injected: effects are applied inside the game, with no capture and no overlay. Intensity and tint update live."
             }
         }
     }
@@ -38,6 +40,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var isScanningGames = false
     @Published var manualBundleID = ""
     @Published private(set) var activeTarget: String?
+    /// The game launched with the payload, if any. Injection and the overlay are
+    /// alternative routes to the same picture, not things to run together.
+    @Published private(set) var injectedGame: GameLibrary.Game?
+    private var injectedProcess: Process?
 
     /// Capture cost lands on the same GPU the game uses. Changing either knob
     /// restarts capture, since the stream configuration is fixed at start.
@@ -67,11 +73,22 @@ final class AppModel: ObservableObject {
     @Published var effect: MetalRenderer.Effect = .cas { didSet { renderer?.setEffect(effect); refreshStatus() } }
     /// Starts at zero: a full-screen overlay that begins applying a strong effect
     /// the moment capture starts is alarming and hard to escape.
-    @Published var intensity: Float = 0 { didSet { renderer?.setIntensity(intensity); refreshStatus() } }
+    @Published var intensity: Float = 0 {
+        didSet {
+            renderer?.setIntensity(intensity)
+            pushInjectionSettings()
+            refreshStatus()
+        }
+    }
     @Published var color = BasicColor() { didSet { renderer?.setColor(color) } }
     /// Paints the overlay a solid colour. Answers "is the overlay reaching the
     /// screen at all", which no subtle effect can.
-    @Published var diagnosticTint = false { didSet { renderer?.setDiagnosticTint(diagnosticTint) } }
+    @Published var diagnosticTint = false {
+        didSet {
+            renderer?.setDiagnosticTint(diagnosticTint)
+            pushInjectionSettings()
+        }
+    }
 
     @Published private(set) var presets: [PresetLibrary.Item] = []
     @Published private(set) var luts: [PresetLibrary.Item] = []
@@ -121,6 +138,42 @@ final class AppModel: ObservableObject {
         activeTarget = trimmed
         renderMode = .capturing
         onStartCapture?(trimmed)
+    }
+
+    // MARK: - Injection
+
+    func launchInjected(_ game: GameLibrary.Game) {
+        importNotes = []
+        do {
+            // Injection processes inside the game; an overlay on top of it would
+            // be a second, redundant pass.
+            if activeTarget != nil { stopCapture() }
+            let process = try InjectionLauncher.launch(
+                game: game, intensity: intensity, tint: diagnosticTint)
+            injectedProcess = process
+            injectedGame = game
+            renderMode = .injected
+            status = "Launched \(game.name) with MetalShade injected."
+            process.terminationHandler = { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self, self.injectedProcess === process else { return }
+                    self.injectedProcess = nil
+                    self.injectedGame = nil
+                    self.renderMode = .idle
+                    self.status = "\(game.name) exited."
+                }
+            }
+        } catch {
+            importNotes = [.init(level: .failure, text: error.localizedDescription)]
+            status = "Could not launch with injection."
+        }
+    }
+
+    /// Injection reads settings from a file, since the launch environment cannot
+    /// change while the game runs.
+    private func pushInjectionSettings() {
+        guard injectedGame != nil else { return }
+        InjectionLauncher.writeSettings(intensity: intensity, tint: diagnosticTint)
     }
 
     func stopCapture() {

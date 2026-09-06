@@ -84,6 +84,19 @@ struct ControlPanelView: View {
                 }
             }
 
+            if let injected = model.injectedGame {
+                HStack(spacing: 8) {
+                    Image(systemName: "bolt.circle.fill").foregroundStyle(.green)
+                    Text("Injected into \(injected.name)").lineLimit(1)
+                    Spacer()
+                }
+                Text("Effects run inside the game. Intensity and tint apply live; "
+                    + "quitting the game ends the session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let active = model.activeTarget {
                 HStack(spacing: 8) {
                     Image(systemName: "record.circle").foregroundStyle(.red)
@@ -103,7 +116,16 @@ struct ControlPanelView: View {
                         HStack(spacing: 8) {
                             Text(game.name).lineLimit(1)
                             Spacer()
-                            Button(model.activeTarget == game.bundleID ? "Restart" : "Use") {
+                            // Injection is the better route where the signature
+                            // allows it: no capture, no compositing, and the game
+                            // keeps its direct-to-display path.
+                            if game.injection.isOpen {
+                                Button("Launch injected") { model.launchInjected(game) }
+                                    .buttonStyle(.borderless)
+                                    .font(.caption)
+                                    .disabled(model.injectedGame != nil)
+                            }
+                            Button(model.activeTarget == game.bundleID ? "Restart" : "Overlay") {
                                 model.startCapture(bundleID: game.bundleID)
                             }
                             .buttonStyle(.borderless)

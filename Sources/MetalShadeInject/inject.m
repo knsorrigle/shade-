@@ -88,6 +88,45 @@ static float gIntensity = 0.0f;
 static BOOL gTint = NO;
 static BOOL gDisabled = NO;
 
+/// Path the app writes live settings to. Environment variables are fixed at
+/// launch, so they cannot drive a slider while a game is running.
+static NSURL *SettingsURL(void) {
+    NSURL *support = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory
+                                                            inDomains:NSUserDomainMask].firstObject;
+    return [[support URLByAppendingPathComponent:@"MetalShade" isDirectory:YES]
+            URLByAppendingPathComponent:@"inject-settings.json"];
+}
+
+static void ApplySettingsFile(void) {
+    NSData *data = [NSData dataWithContentsOfURL:SettingsURL()];
+    if (!data) { return; }
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![json isKindOfClass:[NSDictionary class]]) { return; }
+
+    NSNumber *intensity = json[@"intensity"];
+    NSNumber *tint = json[@"tint"];
+    if ([intensity isKindOfClass:[NSNumber class]]) {
+        gIntensity = fminf(fmaxf(intensity.floatValue, 0.0f), 1.0f);
+    }
+    if ([tint isKindOfClass:[NSNumber class]]) {
+        gTint = tint.boolValue;
+    }
+}
+
+/// Polls rather than watching: the file is tiny, half a second is responsive
+/// enough for a slider, and polling cannot leave a dangling watch inside a
+/// process we do not own.
+static void StartSettingsPolling(void) {
+    static dispatch_source_t timer;
+    dispatch_queue_t queue = dispatch_queue_create("io.metalshade.inject.settings", DISPATCH_QUEUE_SERIAL);
+    timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              (uint64_t)(0.5 * NSEC_PER_SEC), (uint64_t)(0.1 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { ApplySettingsFile(); } });
+    dispatch_resume(timer);
+    MSLog(@"watching %@ for live settings", SettingsURL().path);
+}
+
 static void ReadSettings(void) {
     // Environment variables so a Steam launch option can configure this without
     // a rebuild, and so a bad setting can be removed without touching the game.
@@ -95,8 +134,10 @@ static void ReadSettings(void) {
     if (intensity) { gIntensity = fminf(fmaxf(atof(intensity), 0.0f), 1.0f); }
     const char *tint = getenv("METALSHADE_TINT");
     gTint = (tint && atoi(tint) != 0);
-    MSLog(@"settings: intensity %.2f, tint %@ (set METALSHADE_INTENSITY / METALSHADE_TINT)",
-          gIntensity, gTint ? @"on" : @"off");
+    // A settings file, if the app has written one, wins over the launch
+    // environment: it is the live channel.
+    ApplySettingsFile();
+    MSLog(@"settings: intensity %.2f, tint %@", gIntensity, gTint ? @"on" : @"off");
 }
 
 static BOOL EnsurePipeline(id<MTLDevice> device, MTLPixelFormat format) {
@@ -280,6 +321,7 @@ static void MetalShadeInjectInit(void) {
         MSLog(@"Metal device: %@", device.name ?: @"none");
 
         ReadSettings();
+        StartSettingsPolling();
         InstallDrawableHook();
         if (device) { InstallPresentHookFromDevice(device); }
     }

@@ -36,7 +36,21 @@ Verified on this machine:
 | Cyberpunk 2077 (Steam) | hardened, declares both entitlements — injection permitted |
 | Rise of the Tomb Raider (Steam) | unsigned x86_64 under Rosetta — nothing to enforce |
 
-## Running it
+## Running it from MetalShade
+
+Injection is a MetalShade feature, not a separate tool. The payload ships inside
+`MetalShade.app`, and any detected game whose signature permits injection shows
+a **Launch injected** button in the control panel. MetalShade starts the game
+with the payload loaded, and intensity and tint then apply **live** — the
+launch environment cannot change while a game runs, so the app writes
+`~/Library/Application Support/MetalShade/inject-settings.json` and the payload
+polls it.
+
+Injection and the overlay are alternative routes to the same picture. Starting
+an injected session stops any capture first; running both would process the
+frame twice.
+
+## Running it from the command line
 
 ```bash
 ./scripts/inject.sh "/path/to/Game.app"
