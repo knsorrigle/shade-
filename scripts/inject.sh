@@ -12,7 +12,7 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "$0")/.." && pwd -P)"
-payload="$project_dir/.build/release/libMetalShadeInject.dylib"
+payload="$project_dir/dist/libMetalShadeInject.dylib"
 
 if [[ $# -lt 1 ]]; then
     echo "usage: $(basename "$0") <Game.app | executable> [args...]" >&2
@@ -23,8 +23,9 @@ target="$1"; shift
 
 if [[ ! -f "$payload" ]]; then
     echo "==> Building the payload"
-    (cd "$project_dir" && swift build -c release --product MetalShadeInject)
+    "$project_dir/scripts/build-payload.sh"
 fi
+
 
 # Resolve an .app bundle to its main executable.
 if [[ -d "$target" && "$target" == *.app ]]; then
@@ -36,6 +37,16 @@ fi
 
 if [[ ! -x "$executable" ]]; then
     echo "error: $executable is not executable" >&2
+    exit 1
+fi
+
+# An arm64-only payload cannot load into an x86_64 process, and many Mac ports
+# are x86_64 under Rosetta.
+target_arch="$(file "$executable" 2>/dev/null | grep -o 'x86_64\|arm64' | head -1 || true)"
+payload_archs="$(lipo -archs "$payload" 2>/dev/null || echo unknown)"
+if [[ -n "$target_arch" ]] && ! grep -q -- "$target_arch" <<<"$payload_archs"; then
+    echo "error: the target is $target_arch but the payload provides: $payload_archs" >&2
+    echo "       Rebuild both architectures with ./scripts/build-payload.sh" >&2
     exit 1
 fi
 

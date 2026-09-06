@@ -55,17 +55,63 @@ DYLD_INSERT_LIBRARIES=/absolute/path/to/libMetalShadeInject.dylib %command%
 
 Right-click the game in Steam → Properties → Launch Options.
 
+## Which games this works for
+
+The hooks are generic rather than per-game:
+
+- `-[CAMetalLayer nextDrawable]` is how every Metal application on macOS obtains
+  a frame to draw into, including games built on MoltenVK, which translates
+  Vulkan to Metal and still presents through this layer.
+- `presentDrawable:` is declared by the `MTLCommandBuffer` protocol; the
+  concrete class is private and varies by GPU driver, so it is discovered at
+  runtime from a command buffer created on the same device rather than
+  hardcoded. On this machine it resolves to `AGXG16GFamilyCommandBuffer`.
+
+Two things do vary per game:
+
+| Requirement | Consequence if unmet |
+|---|---|
+| The signature permits injection | Fall back to the overlay; `scripts/check-target.sh` reports which |
+| Architecture matches the payload | The library cannot load at all |
+
+The second is easy to miss. Many Mac ports are x86_64 running under Rosetta, and
+an arm64-only library cannot load into an x86_64 process. `build-payload.sh`
+produces a universal binary covering both, and `inject.sh` compares the target's
+architecture against the payload's and refuses rather than failing silently.
+
+## Settings
+
+Configured by environment variable, so a Steam launch option can set them
+without a rebuild and a bad setting can be removed without touching the game:
+
+| Variable | Effect |
+|---|---|
+| `METALSHADE_INTENSITY` | Sharpening strength, `0`–`1`. Default `0`. |
+| `METALSHADE_TINT` | `1` paints frames green, to confirm processing is live. |
+
+**Both default to off, so injecting alone changes nothing.** The hooks install
+and observe; processing happens only when asked for. A fault while processing
+disables it and lets the unmodified frame through rather than taking the game
+down.
+
+```text
+METALSHADE_TINT=1 DYLD_INSERT_LIBRARIES=/path/to/libMetalShadeInject.dylib %command%
+```
+
 ## Current state
 
-The payload loads, reports the Metal device, and intercepts
-`-[CAMetalLayer nextDrawable]` so the drawable the game is about to render into
-can be identified. **It does not yet modify anything.**
+The payload loads, hooks both entry points, and encodes a post-process pass into
+the game's own command buffer before presentation: the frame is copied to a
+scratch texture (a texture cannot be read and written in one pass) and rendered
+back through a sharpening shader that mirrors the overlay's.
 
-That boundary is deliberate. Hooking a shipping renderer can crash the game or
-corrupt a frame, and the next step — inserting a post-process pass before
-presentation — needs the drawable's texture copied to scratch and rendered back
-through MetalShade's shaders. Doing that blind, inside a game holding a save
-file, is not worth the risk of skipping a stage.
+Verified in a purpose-built Metal application — pipeline compiled, first frame
+processed — and the payload has been confirmed to load and hook inside
+Cyberpunk 2077.
+
+Not yet verified: how it looks and performs across a real play session, and
+whether frame pacing holds. Depth-based effects remain out of reach until the
+game's depth texture is identified, which is per-game work.
 
 ## Cautions
 
