@@ -6,6 +6,27 @@ minor version may carry breaking changes.
 
 ## [Unreleased]
 
+### Verified
+
+- **Injection works on Cyberpunk 2077** (2026-09-06). The payload loads into the
+  game's process, hooks `-[CAMetalLayer nextDrawable]` and
+  `-[AGXG16GFamilyCommandBuffer presentDrawable:]`, and encodes a post-process
+  pass into the game's own command buffer before presentation. Confirmed by
+  reading a pixel back from the presented drawable rather than by inference:
+  `centre pixel after processing: B=0 G=191 R=0 A=255`.
+- The universal payload also loads into Rise of the Tomb Raider, an x86_64
+  Rosetta process, which an arm64-only build could not do.
+
+- **The capture pipeline works end to end against Cyberpunk 2077** (2026-09-06).
+  The diagnostic tint rendered over the running game, which requires every link
+  to hold: the Screen Recording grant, locating a full-screen window on its own
+  Space, ScreenCaptureKit delivering frames (~57 fps sustained), those frames
+  reaching the renderer, the fragment shader executing, and the overlay
+  compositing above a full-screen game.
+- Still unverified: whether the game continues rendering with the overlay above
+  it. Every apparent freeze so far has been the game's own pause menu, shown
+  because it lost focus to the control panel.
+
 ### Added
 
 - The capture target is chosen in the window. The panel lists games found in the

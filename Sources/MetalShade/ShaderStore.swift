@@ -15,6 +15,7 @@ final class ShaderStore {
         directory = root.appendingPathComponent("MetalShade/Shaders", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try installDefaultIfNeeded()
+        try installEffectChain()
         startWatching()
     }
 
@@ -43,6 +44,21 @@ final class ShaderStore {
             self.descriptor = -1
         }
         watcher?.resume()
+    }
+}
+
+extension ShaderStore {
+    /// The chain both routes compile. The injected payload reads it from here at
+    /// runtime, so editing this one file changes the overlay and injection alike.
+    func installEffectChain() throws {
+        let destination = directory.appendingPathComponent("EffectChain.metal")
+        guard let bundled = Bundle.main.url(forResource: "EffectChain", withExtension: "metal"),
+              let source = try? String(contentsOf: bundled, encoding: .utf8) else {
+            return
+        }
+        let existing = try? String(contentsOf: destination, encoding: .utf8)
+        guard existing != source else { return }
+        try source.write(to: destination, atomically: true, encoding: .utf8)
     }
 }
 

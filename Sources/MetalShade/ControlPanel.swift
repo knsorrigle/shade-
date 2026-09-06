@@ -29,6 +29,8 @@ struct ControlPanelView: View {
                 Divider()
                 colorSection
                 Divider()
+                performanceSection
+                Divider()
                 librarySection
                 if !model.importNotes.isEmpty {
                     Divider()
@@ -41,12 +43,32 @@ struct ControlPanelView: View {
     }
 
     private var statusHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("MetalShade").font(.title2.weight(.semibold))
             Text(model.status)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if model.activeTarget != nil {
+                HStack(spacing: 8) {
+                    Button("Stop effects") { model.effectsEnabled = false }
+                        .disabled(!model.effectsEnabled)
+                    Button("Stop capture", action: model.stopCapture)
+                    Spacer()
+                }
+                // A full-screen overlay covers everything. These shortcuts work
+                // even when it does, and are the way out if the picture goes wrong.
+                Text("While playing, use the shortcuts — clicking this window takes "
+                    + "focus from the game, and most games pause when that happens.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("⌘⌥↑ / ⌘⌥↓ intensity · ⌘⌥→ effect · ⌘⌥O bypass · ⌘⌥Q quit")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -60,6 +82,19 @@ struct ControlPanelView: View {
                 } else {
                     Button("Rescan", action: model.scanForGames).buttonStyle(.link).font(.caption)
                 }
+            }
+
+            if let injected = model.injectedGame {
+                HStack(spacing: 8) {
+                    Image(systemName: "bolt.circle.fill").foregroundStyle(.green)
+                    Text("Injected into \(injected.name)").lineLimit(1)
+                    Spacer()
+                }
+                Text("Effects run inside the game. Intensity and tint apply live; "
+                    + "quitting the game ends the session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let active = model.activeTarget {
@@ -81,7 +116,16 @@ struct ControlPanelView: View {
                         HStack(spacing: 8) {
                             Text(game.name).lineLimit(1)
                             Spacer()
-                            Button(model.activeTarget == game.bundleID ? "Restart" : "Use") {
+                            // Injection is the better route where the signature
+                            // allows it: no capture, no compositing, and the game
+                            // keeps its direct-to-display path.
+                            if game.injection.isOpen {
+                                Button("Launch injected") { model.launchInjected(game) }
+                                    .buttonStyle(.borderless)
+                                    .font(.caption)
+                                    .disabled(model.injectedGame != nil)
+                            }
+                            Button(model.activeTarget == game.bundleID ? "Restart" : "Overlay") {
                                 model.startCapture(bundleID: game.bundleID)
                             }
                             .buttonStyle(.borderless)
@@ -152,7 +196,13 @@ struct ControlPanelView: View {
                     .foregroundStyle(.orange)
             }
 
-            LabeledSlider(title: "Intensity", value: $model.intensity, range: 0...1, format: .percent)
+            LabeledSlider(title: "Sharpen", value: $model.intensity, range: 0...1, format: .percent)
+            LabeledSlider(title: "Clarity", value: $model.clarity, range: 0...1, format: .percent)
+            Text("Local contrast: lifts midtone structure rather than edges.")
+                .font(.caption).foregroundStyle(.secondary)
+            LabeledSlider(title: "Bloom", value: $model.bloom, range: 0...2, format: .plain)
+            LabeledSlider(title: "Bloom threshold", value: $model.bloomThreshold, range: 0...1, format: .plain)
+            LabeledSlider(title: "Filmic tone", value: $model.tone, range: 0...1, format: .percent)
 
         }
         .disabled(!model.effectsEnabled)
@@ -164,9 +214,12 @@ struct ControlPanelView: View {
             HStack {
                 Text("Colour").font(.headline)
                 Spacer()
-                Button("Reset", action: model.resetColor)
+                Button("Reset all", action: model.resetEffects)
                     .buttonStyle(.link)
             }
+            LabeledSlider(title: "Exposure", value: $model.exposure, range: -3...3, format: .signed)
+            LabeledSlider(title: "Gamma", value: $model.gamma, range: 0.2...3, format: .plain)
+            LabeledSlider(title: "Vibrance", value: $model.vibrance, range: -1...1, format: .signed)
             LabeledSlider(title: "Brightness", value: $model.color.brightness, range: -1...1, format: .signed)
             LabeledSlider(title: "Contrast", value: $model.color.contrast, range: 0...3, format: .plain)
             LabeledSlider(title: "Saturation", value: $model.color.saturation, range: 0...3, format: .plain)
@@ -174,6 +227,38 @@ struct ControlPanelView: View {
         }
         .disabled(!model.effectsEnabled)
         .opacityWhenDisabled(model.effectsEnabled)
+    }
+
+    private var performanceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Performance").font(.headline)
+
+            Picker("Capture scale", selection: $model.captureScale) {
+                ForEach(CaptureSettings.scaleOptions, id: \.self) { scale in
+                    Text(CaptureSettings.label(forScale: scale)).tag(scale)
+                }
+            }
+            Picker("Frame cap", selection: $model.frameCap) {
+                ForEach(CaptureSettings.frameCapOptions, id: \.self) { cap in
+                    Text("\(cap) fps").tag(cap)
+                }
+            }
+
+            Text("The overlay shares a GPU with the game. Native Retina capture is "
+                + "four times the pixels of Points and is usually what makes a "
+                + "full-screen game unplayable. Changing either restarts capture.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("If the game is still slow, run it windowed or borderless rather "
+                + "than exclusive full-screen: an overlay forces a full-screen game "
+                + "out of direct-to-display scanout, and that costs more than "
+                + "anything measured here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var librarySection: some View {
@@ -379,19 +464,33 @@ final class ControlPanelWindowController {
 
     func show() {
         if window == nil {
-            let window = NSWindow(
+            // A non-activating panel: adjusting a slider must not pull focus away
+            // from the game, which pauses when it loses focus.
+            let window = NSPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 440, height: 620),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel],
                 backing: .buffered, defer: false)
+            window.isFloatingPanel = true
+            window.becomesKeyOnlyIfNeeded = true
+            window.hidesOnDeactivate = false
             window.title = "MetalShade"
+            // Above the overlay's .screenSaver level. The overlay covers every
+            // window on the display, so at any lower level the controls that stop
+            // it are themselves hidden behind it.
+            window.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
             window.contentView = NSHostingView(rootView: ControlPanelView(model: model))
             window.isReleasedWhenClosed = false
             window.center()
             self.window = window
         }
-        // The app is an accessory (no Dock icon), so it must activate itself for
-        // the window to come forward and accept keyboard input.
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        // Only steal focus when nothing is being captured. Activating while a
+        // game is running deactivates it, and many games pause when they lose
+        // focus — which looks exactly like a frozen overlay.
+        if model.activeTarget == nil {
+            NSApp.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
+        } else {
+            window?.orderFrontRegardless()
+        }
     }
 }

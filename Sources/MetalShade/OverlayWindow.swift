@@ -7,13 +7,19 @@ enum ScreenGeometry {
     /// space: origin at the bottom-left, y increasing upward. Passing one to the
     /// other places the overlay mirrored about the screen's centre line — far
     /// enough off that a low window's overlay lands on the menu bar.
+    /// A window that is *entirely* covered by another is marked occluded, and a
+    /// game that believes it is not visible stops rendering — which presents as a
+    /// frozen picture with audio and input still working. Leaving one point
+    /// uncovered keeps the target visible to the window server.
+    static let occlusionRelief: CGFloat = 1
+
     static func screenFrame(fromCaptureFrame frame: CGRect) -> CGRect {
         guard let primary = NSScreen.screens.first else { return frame }
         return CGRect(
             x: frame.origin.x,
-            y: primary.frame.maxY - frame.origin.y - frame.height,
+            y: primary.frame.maxY - frame.origin.y - frame.height + occlusionRelief,
             width: frame.width,
-            height: frame.height)
+            height: max(frame.height - occlusionRelief, 1))
     }
 }
 
@@ -88,7 +94,18 @@ final class OverlayWindow: NSPanel {
     func showOnFirstFrame() {
         guard !hasShownFirstFrame else { return }
         hasShownFirstFrame = true
-        orderFrontRegardless()
+        if targetIsFrontmost { orderFrontRegardless() }
+    }
+
+    /// Whether the app being processed is the one in front.
+    ///
+    /// A full-screen target's overlay covers the whole display, so leaving it up
+    /// after switching away applies the effect to every other window on screen.
+    var targetIsFrontmost = true {
+        didSet {
+            guard hasShownFirstFrame, targetIsFrontmost != oldValue else { return }
+            targetIsFrontmost ? orderFrontRegardless() : orderOut(nil)
+        }
     }
 
     // Deliberately no hide/show control beyond the above: some full-screen Metal
