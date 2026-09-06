@@ -88,7 +88,18 @@ final class OverlayWindow: NSPanel {
     func showOnFirstFrame() {
         guard !hasShownFirstFrame else { return }
         hasShownFirstFrame = true
-        orderFrontRegardless()
+        if targetIsFrontmost { orderFrontRegardless() }
+    }
+
+    /// Whether the app being processed is the one in front.
+    ///
+    /// A full-screen target's overlay covers the whole display, so leaving it up
+    /// after switching away applies the effect to every other window on screen.
+    var targetIsFrontmost = true {
+        didSet {
+            guard hasShownFirstFrame, targetIsFrontmost != oldValue else { return }
+            targetIsFrontmost ? orderFrontRegardless() : orderOut(nil)
+        }
     }
 
     // Deliberately no hide/show control beyond the above: some full-screen Metal

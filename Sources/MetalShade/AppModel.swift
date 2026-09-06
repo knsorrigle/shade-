@@ -45,7 +45,9 @@ final class AppModel: ObservableObject {
     @Published var status = "starting…"
     @Published var effectsEnabled = true { didSet { renderer?.setEffectsEnabled(effectsEnabled); refreshStatus() } }
     @Published var effect: MetalRenderer.Effect = .cas { didSet { renderer?.setEffect(effect); refreshStatus() } }
-    @Published var intensity: Float = 0.65 { didSet { renderer?.setIntensity(intensity); refreshStatus() } }
+    /// Starts at zero: a full-screen overlay that begins applying a strong effect
+    /// the moment capture starts is alarming and hard to escape.
+    @Published var intensity: Float = 0 { didSet { renderer?.setIntensity(intensity); refreshStatus() } }
     @Published var color = BasicColor() { didSet { renderer?.setColor(color) } }
     /// Paints the overlay a solid colour. Answers "is the overlay reaching the
     /// screen at all", which no subtle effect can.

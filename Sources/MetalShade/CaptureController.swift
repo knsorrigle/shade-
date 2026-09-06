@@ -16,6 +16,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private let countLock = NSLock()
     /// One prompt per launch, however many targets are tried.
     private static var hasRequestedAccess = false
+    private var activationObserver: NSObjectProtocol?
 
     init(bundleID: String, renderer: MetalRenderer, report: @escaping (String) -> Void) {
         self.bundleID = bundleID
@@ -142,6 +143,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             beginTrackingWindow()
             beginRateReporting()
+            observeFrontmostApplication()
             scheduleNoFrameCheck()
             report("Waiting for frames from \(bundleID)…")
         } catch {
@@ -162,6 +164,10 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Tears the session down so another target can be selected without
     /// relaunching the app.
     func stop() {
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+            self.activationObserver = nil
+        }
         trackingTimer?.invalidate()
         trackingTimer = nil
         rateTimer?.invalidate()
@@ -197,6 +203,32 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
               let window = content.windows.first(where: { $0.windowID == targetWindowID }) else { return }
         await MainActor.run { self.overlay?.update(captureFrame: window.frame) }
+    }
+
+    /// Hides the overlay whenever the target is not the frontmost app.
+    ///
+    /// A full-screen target's overlay spans the whole display. Left up after
+    /// switching away, it applies the effect to every other window on screen —
+    /// including MetalShade's own controls.
+    private func observeFrontmostApplication() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.syncOverlayVisibility()
+            self.activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                self?.syncOverlayVisibility()
+            }
+        }
+    }
+
+    private func syncOverlayVisibility() {
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let isTarget = front == bundleID
+        Task { @MainActor [weak self] in
+            self?.overlay?.targetIsFrontmost = isTarget
+        }
     }
 
     /// Reports the delivered frame rate once a second. Whether frames are

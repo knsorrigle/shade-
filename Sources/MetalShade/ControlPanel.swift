@@ -41,12 +41,26 @@ struct ControlPanelView: View {
     }
 
     private var statusHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("MetalShade").font(.title2.weight(.semibold))
             Text(model.status)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if model.activeTarget != nil {
+                HStack(spacing: 8) {
+                    Button("Stop effects") { model.effectsEnabled = false }
+                        .disabled(!model.effectsEnabled)
+                    Button("Stop capture", action: model.stopCapture)
+                    Spacer()
+                }
+                // A full-screen overlay covers everything. These shortcuts work
+                // even when it does, and are the way out if the picture goes wrong.
+                Text("⌘⌥O bypasses effects · ⌘⌥Q quits, both from anywhere")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -384,6 +398,10 @@ final class ControlPanelWindowController {
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             window.title = "MetalShade"
+            // Above the overlay's .screenSaver level. The overlay covers every
+            // window on the display, so at any lower level the controls that stop
+            // it are themselves hidden behind it.
+            window.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
             window.contentView = NSHostingView(rootView: ControlPanelView(model: model))
             window.isReleasedWhenClosed = false
             window.center()
