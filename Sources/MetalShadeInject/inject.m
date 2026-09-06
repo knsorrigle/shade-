@@ -355,6 +355,7 @@ static void VerifyOutput(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> targ
 }
 
 static void InstallPresentHook(id<MTLCommandBuffer> sample);
+static void InstallDepthProbe(Class bufferClass);
 
 static id<CAMetalDrawable> MS_nextDrawable(id self, SEL _cmd) {
     id<CAMetalDrawable> drawable =
@@ -455,6 +456,8 @@ static void InstallPresentHookFromDevice(id<MTLDevice> device) {
         method_setImplementation(at, (IMP)MS_presentAt);
         MSLog(@"hooked presentDrawable:atTime:");
     }
+
+    InstallDepthProbe(bufferClass);
 }
 
 /// CAMetalDrawable is a protocol; its concrete class is private, so it is found
@@ -467,6 +470,66 @@ static void InstallDirectPresentHook(void) {
     gOriginalDrawablePresent = method_getImplementation(method);
     method_setImplementation(method, (IMP)MS_drawablePresent);
     MSLog(@"hooked -[CAMetalDrawable present]");
+}
+
+#pragma mark - Depth reconnaissance
+
+// Depth-based effects need the scene depth buffer, which never reaches a
+// presented frame. It is reachable here — we are inside the process while the
+// frame is still being built — but only if the game created the texture with
+// shaderRead usage. That is fixed at creation and cannot be added afterwards,
+// so this pass answers whether the effect is possible at all before any attempt
+// to build one.
+//
+// It only observes. Nothing is modified and nothing is sampled.
+
+static IMP gOriginalRenderEncoder = NULL;
+static NSMutableSet<NSString *> *gSeenDepth = nil;
+
+static NSString *DescribeUsage(MTLTextureUsage usage) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (usage & MTLTextureUsageShaderRead)      { [parts addObject:@"shaderRead"]; }
+    if (usage & MTLTextureUsageShaderWrite)     { [parts addObject:@"shaderWrite"]; }
+    if (usage & MTLTextureUsageRenderTarget)    { [parts addObject:@"renderTarget"]; }
+    if (usage & MTLTextureUsagePixelFormatView) { [parts addObject:@"pixelFormatView"]; }
+    return parts.count ? [parts componentsJoinedByString:@"|"] : @"none";
+}
+
+static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *descriptor) {
+    @try {
+        id<MTLTexture> depth = descriptor.depthAttachment.texture;
+        if (depth) {
+            // One line per distinct depth target, not per frame.
+            NSString *key = [NSString stringWithFormat:@"%lux%lu-%lu-%lu",
+                             (unsigned long)depth.width, (unsigned long)depth.height,
+                             (unsigned long)depth.pixelFormat, (unsigned long)depth.usage];
+            @synchronized (gSeenDepth) {
+                if (![gSeenDepth containsObject:key]) {
+                    [gSeenDepth addObject:key];
+                    id<MTLTexture> colour = descriptor.colorAttachments[0].texture;
+                    MSLog(@"depth target %lux%lu format=%lu usage=[%@] samplable=%@ "
+                          @"(colour attachment %lux%lu)",
+                          (unsigned long)depth.width, (unsigned long)depth.height,
+                          (unsigned long)depth.pixelFormat, DescribeUsage(depth.usage),
+                          (depth.usage & MTLTextureUsageShaderRead) ? @"YES" : @"no",
+                          (unsigned long)colour.width, (unsigned long)colour.height);
+                }
+            }
+        }
+    } @catch (NSException *exception) {
+        // Reconnaissance must never be the reason a game fails.
+    }
+    return ((id (*)(id, SEL, MTLRenderPassDescriptor *))gOriginalRenderEncoder)(self, _cmd, descriptor);
+}
+
+static void InstallDepthProbe(Class bufferClass) {
+    if (!getenv("METALSHADE_PROBE_DEPTH")) { return; }
+    Method method = class_getInstanceMethod(bufferClass, @selector(renderCommandEncoderWithDescriptor:));
+    if (!method) { MSLog(@"no -renderCommandEncoderWithDescriptor: to probe"); return; }
+    gSeenDepth = [NSMutableSet set];
+    gOriginalRenderEncoder = method_getImplementation(method);
+    method_setImplementation(method, (IMP)MS_renderCommandEncoder);
+    MSLog(@"depth probe active — reporting each distinct depth target once");
 }
 
 #pragma mark - Entry point
