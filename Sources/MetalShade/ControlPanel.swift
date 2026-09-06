@@ -196,7 +196,13 @@ struct ControlPanelView: View {
                     .foregroundStyle(.orange)
             }
 
-            LabeledSlider(title: "Intensity", value: $model.intensity, range: 0...1, format: .percent)
+            LabeledSlider(title: "Sharpen", value: $model.intensity, range: 0...1, format: .percent)
+            LabeledSlider(title: "Clarity", value: $model.clarity, range: 0...1, format: .percent)
+            Text("Local contrast: lifts midtone structure rather than edges.")
+                .font(.caption).foregroundStyle(.secondary)
+            LabeledSlider(title: "Bloom", value: $model.bloom, range: 0...2, format: .plain)
+            LabeledSlider(title: "Bloom threshold", value: $model.bloomThreshold, range: 0...1, format: .plain)
+            LabeledSlider(title: "Filmic tone", value: $model.tone, range: 0...1, format: .percent)
 
         }
         .disabled(!model.effectsEnabled)
@@ -208,9 +214,12 @@ struct ControlPanelView: View {
             HStack {
                 Text("Colour").font(.headline)
                 Spacer()
-                Button("Reset", action: model.resetColor)
+                Button("Reset all", action: model.resetEffects)
                     .buttonStyle(.link)
             }
+            LabeledSlider(title: "Exposure", value: $model.exposure, range: -3...3, format: .signed)
+            LabeledSlider(title: "Gamma", value: $model.gamma, range: 0.2...3, format: .plain)
+            LabeledSlider(title: "Vibrance", value: $model.vibrance, range: -1...1, format: .signed)
             LabeledSlider(title: "Brightness", value: $model.color.brightness, range: -1...1, format: .signed)
             LabeledSlider(title: "Contrast", value: $model.color.contrast, range: 0...3, format: .plain)
             LabeledSlider(title: "Saturation", value: $model.color.saturation, range: 0...3, format: .plain)
