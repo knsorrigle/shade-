@@ -86,15 +86,33 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             } ?? false
 
             let filter: SCContentFilter
-            if coversDisplay, let display {
-                let selfBundleID = Bundle.main.bundleIdentifier
-                let excluded = content.applications.filter { $0.bundleIdentifier == selfBundleID }
+            // Display capture draws our own output back into the next frame unless
+            // MetalShade is excluded. When that exclusion silently failed the
+            // result was runaway feedback: sharpen, present, capture, sharpen
+            // again, dozens of times a second, across the whole screen. Refuse to
+            // capture the display at all unless the exclusion is confirmed.
+            let selfBundleID = Bundle.main.bundleIdentifier
+            // Re-read shareable content: the snapshot above predates our overlay,
+            // so it cannot list it.
+            let refreshed = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let selfApps = (refreshed ?? content).applications.filter { $0.bundleIdentifier == selfBundleID }
+            let selfWindows = (refreshed ?? content).windows.filter {
+                $0.owningApplication?.bundleIdentifier == selfBundleID
+            }
+
+            if coversDisplay, let display, !selfApps.isEmpty {
                 filter = SCContentFilter(display: display,
-                                         excludingApplications: excluded,
+                                         excludingApplications: selfApps,
                                          exceptingWindows: [])
                 Diagnostics.log("window covers the display; capturing display \(display.displayID) "
-                    + "\(Int(display.frame.width))x\(Int(display.frame.height)), excluding self")
+                    + "\(Int(display.frame.width))x\(Int(display.frame.height)); "
+                    + "excluding \(selfApps.count) of our app(s), \(selfWindows.count) of our window(s)")
             } else {
+                if coversDisplay {
+                    Diagnostics.log("REFUSING display capture: could not identify our own app to exclude "
+                        + "(bundle \(selfBundleID ?? "nil")). Falling back to window capture to avoid a "
+                        + "feedback loop.")
+                }
                 filter = SCContentFilter(desktopIndependentWindow: window)
                 Diagnostics.log("capturing the window directly")
             }
