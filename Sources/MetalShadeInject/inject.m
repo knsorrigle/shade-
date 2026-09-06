@@ -91,6 +91,10 @@ static float gExposure = 0, gGamma = 1.0f, gVibrance = 0;
 static float gBrightness = 0, gContrast = 1.0f, gSaturation = 1.0f, gTemperature = 0;
 static BOOL gTint = NO;
 static BOOL gDisabled = NO;
+/// Draws the scene depth buffer instead of the frame, to establish that it is
+/// the right texture before an effect is built on it.
+static BOOL gShowDepth = NO;
+static BOOL DrawDepthView(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable);
 
 static float ReadNumber(NSDictionary *json, NSString *key, float fallback) {
     NSNumber *value = json[key];
@@ -126,6 +130,8 @@ static void ReadSettings(void) {
     if (intensity) { gSharpen = fminf(fmaxf(atof(intensity), 0.0f), 1.0f); }
     const char *tint = getenv("METALSHADE_TINT");
     gTint = (tint && atoi(tint) != 0);
+    const char *showDepth = getenv("METALSHADE_SHOW_DEPTH");
+    gShowDepth = (showDepth && atoi(showDepth) != 0);
 
     // A settings file, if the app has written one, wins: it is the live channel.
     ApplySettingsFile();
@@ -324,9 +330,9 @@ static void ReportFirstProcessed(void) {
 /// Reads one pixel back from the processed frame once, so the log says what was
 /// actually written instead of only that the code ran.
 static void VerifyOutput(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> target) {
-    static BOOL verified = NO;
-    if (verified) { return; }
-    verified = YES;
+    static int reports = 0;
+    if (reports >= 8) { return; }
+    reports += 1;
 
     id<MTLDevice> device = target.device;
     MTLTextureDescriptor *descriptor =
@@ -367,6 +373,14 @@ static id<CAMetalDrawable> MS_nextDrawable(id self, SEL _cmd) {
 /// Shared by every present variant. Metal offers four ways to show a frame and
 /// engines differ in which they use, so hooking only one works by luck.
 static void ProcessIfWanted(id commandBuffer, id<CAMetalDrawable> drawable) {
+    if (!gDisabled && drawable && gShowDepth) {
+        @try {
+            if (DrawDepthView((id<MTLCommandBuffer>)commandBuffer, drawable)) { return; }
+        } @catch (NSException *exception) {
+            gShowDepth = NO;
+            MSLog(@"depth view disabled after exception: %@", exception.reason);
+        }
+    }
     if (!gDisabled && drawable && HasVisibleEffect()) {
         // Never let a fault here take the game down: fall through to an
         // unmodified present and stop trying.
@@ -486,6 +500,41 @@ static void InstallDirectPresentHook(void) {
 static IMP gOriginalRenderEncoder = NULL;
 static NSMutableSet<NSString *> *gSeenDepth = nil;
 
+/// The scene depth texture, held from the pass that writes it.
+///
+/// It cannot be picked up at presentation: by then the frame is a finished
+/// colour image and depth is no longer bound to anything. Retaining it here
+/// keeps it alive; its contents are the current frame's, since the engine
+/// rewrites the same target each frame.
+static id<MTLTexture> gSceneDepth = nil;
+static NSString *gSceneDepthKey = nil;
+/// Every depth target seen this run, so the one holding real data can be found
+/// by reading them rather than by guessing from size.
+static NSMutableArray<id<MTLTexture>> *gDepthCandidates = nil;
+static id<MTLRenderPipelineState> gDepthView = nil;
+/// Our own copy of the scene depth.
+///
+/// Sampling the game's depth texture directly returns zero while a blit from the
+/// same texture in the same command buffer reads real values — the contents are
+/// resolvable but not sampleable as bound. Copying first makes them ours to read.
+static id<MTLTexture> gDepthCopy = nil;
+
+/// Distinguishes scene depth from the other depth targets a frame produces.
+///
+/// Shadow maps are square and usually 16-bit; hierarchical Z is a fraction of
+/// the size and has no colour attachment. Scene depth is written alongside a
+/// colour attachment of matching size, at the internal render resolution.
+static BOOL LooksLikeSceneDepth(id<MTLTexture> depth, id<MTLTexture> colour) {
+    if (!depth || !colour) { return NO; }
+    if (!(depth.usage & MTLTextureUsageShaderRead)) { return NO; }
+    if (depth.width == depth.height) { return NO; }          // square: a shadow map
+    if (depth.width != colour.width || depth.height != colour.height) { return NO; }
+    if (depth.width < 640 || depth.height < 360) { return NO; }  // too small to be the scene
+    // Depth32Float_Stencil8 needs a texture view to sample the depth plane
+    // alone, which is a complication worth avoiding while establishing this.
+    return depth.pixelFormat == MTLPixelFormatDepth32Float;
+}
+
 static NSString *DescribeUsage(MTLTextureUsage usage) {
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     if (usage & MTLTextureUsageShaderRead)      { [parts addObject:@"shaderRead"]; }
@@ -499,6 +548,32 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
     @try {
         id<MTLTexture> depth = descriptor.depthAttachment.texture;
         if (depth) {
+            id<MTLTexture> colour = descriptor.colorAttachments[0].texture;
+            if (depth.usage & MTLTextureUsageShaderRead) {
+                @synchronized (gSeenDepth) {
+                    if (!gDepthCandidates) { gDepthCandidates = [NSMutableArray array]; }
+                    // Only shapes that could be scene depth. A shadow map is
+                    // populated too, and would otherwise win on contents alone.
+                    if (LooksLikeSceneDepth(depth, colour)
+                        && ![gDepthCandidates containsObject:depth]
+                        && gDepthCandidates.count < 12) {
+                        [gDepthCandidates addObject:depth];
+                    }
+                    // Size alone cannot tell a populated scene depth from a
+                    // pre-pass target that is still cleared; the survey below
+                    // reads them instead.
+                    if (LooksLikeSceneDepth(depth, colour)
+                        && (!gSceneDepth || depth.width > gSceneDepth.width)) {
+                        gSceneDepth = depth;
+                        NSString *key = [NSString stringWithFormat:@"%lux%lu",
+                                         (unsigned long)depth.width, (unsigned long)depth.height];
+                        if (![key isEqualToString:gSceneDepthKey]) {
+                            gSceneDepthKey = key;
+                            MSLog(@"provisional scene depth %@", key);
+                        }
+                    }
+                }
+            }
             // One line per distinct depth target, not per frame.
             NSString *key = [NSString stringWithFormat:@"%lux%lu-%lu-%lu",
                              (unsigned long)depth.width, (unsigned long)depth.height,
@@ -506,13 +581,13 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
             @synchronized (gSeenDepth) {
                 if (![gSeenDepth containsObject:key]) {
                     [gSeenDepth addObject:key];
-                    id<MTLTexture> colour = descriptor.colorAttachments[0].texture;
+                    id<MTLTexture> colourLog = descriptor.colorAttachments[0].texture;
                     MSLog(@"depth target %lux%lu format=%lu usage=[%@] samplable=%@ "
                           @"(colour attachment %lux%lu)",
                           (unsigned long)depth.width, (unsigned long)depth.height,
                           (unsigned long)depth.pixelFormat, DescribeUsage(depth.usage),
                           (depth.usage & MTLTextureUsageShaderRead) ? @"YES" : @"no",
-                          (unsigned long)colour.width, (unsigned long)colour.height);
+                          (unsigned long)colourLog.width, (unsigned long)colourLog.height);
                 }
             }
         }
@@ -523,13 +598,239 @@ static id MS_renderCommandEncoder(id self, SEL _cmd, MTLRenderPassDescriptor *de
 }
 
 static void InstallDepthProbe(Class bufferClass) {
-    if (!getenv("METALSHADE_PROBE_DEPTH")) { return; }
+    // Also required to show depth: the texture is only reachable from the pass
+    // that writes it.
+    if (!getenv("METALSHADE_PROBE_DEPTH") && !gShowDepth) { return; }
     Method method = class_getInstanceMethod(bufferClass, @selector(renderCommandEncoderWithDescriptor:));
     if (!method) { MSLog(@"no -renderCommandEncoderWithDescriptor: to probe"); return; }
     gSeenDepth = [NSMutableSet set];
     gOriginalRenderEncoder = method_getImplementation(method);
     method_setImplementation(method, (IMP)MS_renderCommandEncoder);
     MSLog(@"depth probe active — reporting each distinct depth target once");
+}
+
+/// Draws the held depth buffer as greyscale, to establish that it is the scene
+/// depth and correctly oriented before any effect is built on it.
+///
+/// Kept separate from the shared effect chain: the overlay has no depth to bind,
+/// and sampling an unbound texture there would be invalid.
+static NSString *const kDepthViewSource = @"#include <metal_stdlib>\n"
+"using namespace metal;\n"
+"struct VertexOut { float4 position [[position]]; float2 uv; };\n"
+"vertex VertexOut depthVertex(uint id [[vertex_id]]) {\n"
+"  float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };\n"
+"  VertexOut o; o.position = float4(p[id], 0, 1);\n"
+"  o.uv = float2((p[id].x + 1) * 0.5, 1 - (p[id].y + 1) * 0.5); return o; }\n"
+"fragment float4 depthFragment(VertexOut in [[stage_in]],\n"
+"                              depth2d<float> depth [[texture(0)]]) {\n"
+"  constexpr sampler s(address::clamp_to_edge, filter::nearest);\n"
+"  float d = depth.sample(s, in.uv);\n"
+"  // Reversed-Z: distant geometry sits near zero and the whole scene occupies a\n"
+"  // few thousandths, so the range is expanded before shaping. Without this the\n"
+"  // image is uniformly black even when the buffer is correct.\n"
+"  float shaped = pow(saturate(d * 128.0), 0.45);\n"
+"  return float4(shaped, shaped, shaped, 1.0); }\n";
+
+static BOOL EnsureDepthView(id<MTLDevice> device, MTLPixelFormat format) {
+    if (gDepthView) { return YES; }
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:kDepthViewSource options:nil error:&error];
+    if (!library) { MSLog(@"depth view shader failed: %@", error); return NO; }
+    MTLRenderPipelineDescriptor *descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = [library newFunctionWithName:@"depthVertex"];
+    descriptor.fragmentFunction = [library newFunctionWithName:@"depthFragment"];
+    descriptor.colorAttachments[0].pixelFormat = format;
+    gDepthView = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!gDepthView) { MSLog(@"depth view pipeline failed: %@", error); return NO; }
+    MSLog(@"depth view ready");
+    return YES;
+}
+
+/// Reads a grid of depth values back once, so the log says what is actually in
+/// the texture rather than leaving it to be judged by eye.
+///
+/// A buffer holding real scene depth varies across the frame. One that is
+/// uniform holds a cleared or unwritten target, and would look like a plausible
+/// flat image while carrying nothing.
+static void SampleDepthGrid(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> depth) {
+    MTLTextureDescriptor *descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth.pixelFormat
+                                                           width:3 height:3 mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModeShared;
+    id<MTLTexture> probe = [depth.device newTextureWithDescriptor:descriptor];
+    if (!probe) { return; }
+
+    id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+    for (NSUInteger row = 0; row < 3; ++row) {
+        for (NSUInteger column = 0; column < 3; ++column) {
+            NSUInteger x = depth.width * (column * 2 + 1) / 6;
+            NSUInteger y = depth.height * (row * 2 + 1) / 6;
+            [blit copyFromTexture:depth sourceSlice:0 sourceLevel:0
+                     sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(1, 1, 1)
+                        toTexture:probe destinationSlice:0 destinationLevel:0
+                destinationOrigin:MTLOriginMake(column, row, 0)];
+        }
+    }
+    [blit endEncoding];
+
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull done) {
+        float values[9] = {0};
+        [probe getBytes:values bytesPerRow:3 * sizeof(float)
+             fromRegion:MTLRegionMake2D(0, 0, 3, 3) mipmapLevel:0];
+        float low = values[0], high = values[0];
+        for (int i = 1; i < 9; ++i) {
+            low = fminf(low, values[i]);
+            high = fmaxf(high, values[i]);
+        }
+        MSLog(@"depth grid: %.4f %.4f %.4f | %.4f %.4f %.4f | %.4f %.4f %.4f",
+              values[0], values[1], values[2], values[3], values[4],
+              values[5], values[6], values[7], values[8]);
+        MSLog(@"depth range %.4f to %.4f — %@", low, high,
+              (high - low) > 0.0001f ? @"varies, so this is real scene depth"
+                                     : @"uniform, so this target holds nothing useful");
+    }];
+}
+
+/// Reads a grid from every depth target seen, so the one holding the frame's
+/// geometry is identified by its contents.
+///
+/// A populated depth buffer varies across the frame. A pre-pass or freshly
+/// cleared target is uniform, and looks like a plausible flat image while
+/// carrying nothing — which is exactly what the size heuristic selected.
+static void SurveyDepthCandidates(id<MTLCommandBuffer> commandBuffer) {
+    NSArray<id<MTLTexture>> *candidates = nil;
+    @synchronized (gSeenDepth) { candidates = [gDepthCandidates copy]; }
+    if (!candidates.count) { return; }
+
+    for (id<MTLTexture> depth in candidates) {
+        if (depth.pixelFormat != MTLPixelFormatDepth32Float
+            && depth.pixelFormat != MTLPixelFormatDepth16Unorm) { continue; }
+        BOOL isFloat = depth.pixelFormat == MTLPixelFormatDepth32Float;
+
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth.pixelFormat
+                                                               width:3 height:3 mipmapped:NO];
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> probe = [depth.device newTextureWithDescriptor:descriptor];
+        if (!probe) { continue; }
+
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        for (NSUInteger row = 0; row < 3; ++row) {
+            for (NSUInteger column = 0; column < 3; ++column) {
+                [blit copyFromTexture:depth sourceSlice:0 sourceLevel:0
+                         sourceOrigin:MTLOriginMake(depth.width * (column * 2 + 1) / 6,
+                                                    depth.height * (row * 2 + 1) / 6, 0)
+                           sourceSize:MTLSizeMake(1, 1, 1)
+                            toTexture:probe destinationSlice:0 destinationLevel:0
+                    destinationOrigin:MTLOriginMake(column, row, 0)];
+            }
+        }
+        [blit endEncoding];
+
+        NSUInteger width = depth.width, height = depth.height;
+        id<MTLTexture> probeSource = depth;
+        [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull done) {
+            float values[9] = {0};
+            if (isFloat) {
+                [probe getBytes:values bytesPerRow:3 * sizeof(float)
+                     fromRegion:MTLRegionMake2D(0, 0, 3, 3) mipmapLevel:0];
+            } else {
+                uint16_t raw[9] = {0};
+                [probe getBytes:raw bytesPerRow:3 * sizeof(uint16_t)
+                     fromRegion:MTLRegionMake2D(0, 0, 3, 3) mipmapLevel:0];
+                for (int i = 0; i < 9; ++i) { values[i] = raw[i] / 65535.0f; }
+            }
+            float low = values[0], high = values[0];
+            for (int i = 1; i < 9; ++i) {
+                low = fminf(low, values[i]);
+                high = fmaxf(high, values[i]);
+            }
+            BOOL hasData = (high - low) > 0.0001f;
+            MSLog(@"candidate %lux%lu range %.4f..%.4f  %@  [%.3f %.3f %.3f %.3f %.3f]",
+                  (unsigned long)width, (unsigned long)height, low, high,
+                  hasData ? @"<-- HAS DATA" : @"uniform",
+                  values[0], values[2], values[4], values[6], values[8]);
+            if (hasData) {
+                // Contents decide, not size: switch the view to whatever is
+                // actually carrying the frame's geometry.
+                @synchronized (gSeenDepth) {
+                    if (gSceneDepth != probeSource) {
+                        gSceneDepth = probeSource;
+                        MSLog(@"scene depth is %lux%lu (chosen by contents)",
+                              (unsigned long)width, (unsigned long)height);
+                    }
+                }
+            }
+        }];
+    }
+}
+
+/// Returns YES when it has drawn, so the normal chain is skipped for that frame.
+static BOOL DrawDepthView(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
+    if (!gShowDepth) { return NO; }
+    id<MTLTexture> depth = nil;
+    @synchronized (gSeenDepth ?: (id)[NSNull null]) { depth = gSceneDepth; }
+    if (!depth) { return NO; }
+
+    id<MTLTexture> target = drawable.texture;
+    if (!EnsureDepthView(target.device, target.pixelFormat)) { gShowDepth = NO; return NO; }
+
+    if (!gDepthCopy || gDepthCopy.width != depth.width || gDepthCopy.height != depth.height
+        || gDepthCopy.pixelFormat != depth.pixelFormat) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth.pixelFormat
+                                                               width:depth.width
+                                                              height:depth.height
+                                                           mipmapped:NO];
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModePrivate;
+        gDepthCopy = [depth.device newTextureWithDescriptor:descriptor];
+        if (!gDepthCopy) { gShowDepth = NO; return NO; }
+        MSLog(@"depth copy allocated %lux%lu", (unsigned long)depth.width, (unsigned long)depth.height);
+    }
+
+    id<MTLBlitCommandEncoder> copy = [commandBuffer blitCommandEncoder];
+    [copy copyFromTexture:depth sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(depth.width, depth.height, 1)
+                toTexture:gDepthCopy destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [copy endEncoding];
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:gDepthView];
+    [encoder setFragmentTexture:gDepthCopy atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+
+    // Survey repeatedly rather than once. The first presented frame is a splash
+    // or loading screen with no world geometry, so every depth target reads as
+    // cleared and the survey concludes nothing.
+    static uint64_t frame = 0;
+    static int surveys = 0;
+    if (frame == 0) {
+        MSLog(@"drew scene depth %lux%lu over the frame, storage=%lu",
+              (unsigned long)depth.width, (unsigned long)depth.height,
+              (unsigned long)depth.storageMode);
+    }
+    frame += 1;
+    if (surveys < 8 && frame % 300 == 1) {
+        surveys += 1;
+        MSLog(@"survey %d at frame %llu, depth storage=%lu", surveys, frame,
+              (unsigned long)depth.storageMode);
+        SurveyDepthCandidates(commandBuffer);
+        // Read the drawable at the same moment as the survey, so what the shader
+        // wrote is comparable with what the blit read. Comparing a frame-zero
+        // loading screen against a later survey proved nothing.
+        VerifyOutput(commandBuffer, target);
+    }
+    return YES;
 }
 
 #pragma mark - Entry point
