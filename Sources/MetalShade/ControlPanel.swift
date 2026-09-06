@@ -29,6 +29,8 @@ struct ControlPanelView: View {
                 Divider()
                 colorSection
                 Divider()
+                performanceSection
+                Divider()
                 librarySection
                 if !model.importNotes.isEmpty {
                     Divider()
@@ -194,6 +196,38 @@ struct ControlPanelView: View {
         }
         .disabled(!model.effectsEnabled)
         .opacityWhenDisabled(model.effectsEnabled)
+    }
+
+    private var performanceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Performance").font(.headline)
+
+            Picker("Capture scale", selection: $model.captureScale) {
+                ForEach(CaptureSettings.scaleOptions, id: \.self) { scale in
+                    Text(CaptureSettings.label(forScale: scale)).tag(scale)
+                }
+            }
+            Picker("Frame cap", selection: $model.frameCap) {
+                ForEach(CaptureSettings.frameCapOptions, id: \.self) { cap in
+                    Text("\(cap) fps").tag(cap)
+                }
+            }
+
+            Text("The overlay shares a GPU with the game. Native Retina capture is "
+                + "four times the pixels of Points and is usually what makes a "
+                + "full-screen game unplayable. Changing either restarts capture.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("If the game is still slow, run it windowed or borderless rather "
+                + "than exclusive full-screen: an overlay forces a full-screen game "
+                + "out of direct-to-display scanout, and that costs more than "
+                + "anything measured here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var librarySection: some View {

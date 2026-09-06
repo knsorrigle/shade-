@@ -127,7 +127,10 @@ final class MetalRenderer {
         encoder.setFragmentBytes(&localUniforms, length: MemoryLayout<EffectUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
-        commandBuffer.present(drawable)
+        // Presenting back to back saturates the GPU and, under display capture,
+        // each present is itself a display update that provokes another captured
+        // frame. Pace it to the configured cap.
+        commandBuffer.present(drawable, afterMinimumDuration: 1.0 / Double(CaptureSettings.shared.frameCap))
         commandBuffer.addCompletedHandler { [weak self] _ in
             _ = cvTexture // Keep the IOSurface-backed capture texture alive through GPU use.
             self?.finishFrame()

@@ -119,10 +119,16 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
             }
 
             let configuration = SCStreamConfiguration()
-            configuration.width = max(1, Int(window.frame.width * 2))
-            configuration.height = max(1, Int(window.frame.height * 2))
+            // Capturing a Retina display at 2x is 7.6 megapixels a frame. That
+            // cost lands on the same GPU the game is using, so it is a setting
+            // rather than a constant.
+            let scale = CaptureSettings.shared.scale
+            let cap = CaptureSettings.shared.frameCap
+            configuration.width = max(1, Int(window.frame.width * scale))
+            configuration.height = max(1, Int(window.frame.height * scale))
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(cap))
+            Diagnostics.log("capture scale \(scale)x, frame cap \(cap)")
             configuration.queueDepth = 3
             configuration.showsCursor = false
             configuration.capturesAudio = false

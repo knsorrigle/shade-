@@ -39,6 +39,26 @@ final class AppModel: ObservableObject {
     @Published var manualBundleID = ""
     @Published private(set) var activeTarget: String?
 
+    /// Capture cost lands on the same GPU the game uses. Changing either knob
+    /// restarts capture, since the stream configuration is fixed at start.
+    @Published var captureScale: CGFloat = CaptureSettings.shared.scale {
+        didSet {
+            CaptureSettings.shared.scale = captureScale
+            restartCaptureIfRunning()
+        }
+    }
+    @Published var frameCap: Int = CaptureSettings.shared.frameCap {
+        didSet {
+            CaptureSettings.shared.frameCap = frameCap
+            restartCaptureIfRunning()
+        }
+    }
+
+    private func restartCaptureIfRunning() {
+        guard let target = activeTarget else { return }
+        onStartCapture?(target)
+    }
+
     /// Set by AppDelegate; starting and stopping capture is its job.
     var onStartCapture: ((String) -> Void)?
     var onStopCapture: (() -> Void)?
