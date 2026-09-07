@@ -99,6 +99,8 @@ final class AppModel: ObservableObject {
     @Published var vibrance: Float = 0 { didSet { pushStages() } }
     /// Depth fog needs the scene depth buffer, which only injection can reach.
     @Published var fog: Float = 0 { didSet { pushInjectionSettings() } }
+    /// Ambient occlusion. Needs depth, so injection only.
+    @Published var ao: Float = 0 { didSet { pushInjectionSettings() } }
     var fogAvailable: Bool { injectedGame != nil }
 
     /// Both routes compile the same chain, so both take the same values.
@@ -110,7 +112,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetEffects() {
-        clarity = 0; tone = 0; bloom = 0; bloomThreshold = 0.8; fog = 0
+        clarity = 0; tone = 0; bloom = 0; bloomThreshold = 0.8; fog = 0; ao = 0
         exposure = 0; gamma = 1; vibrance = 0
         intensity = 0
         color = BasicColor()
@@ -180,7 +182,7 @@ final class AppModel: ObservableObject {
             sharpen: intensity, clarity: clarity, tone: tone,
             bloom: bloom, bloomThreshold: bloomThreshold,
             exposure: exposure, gamma: gamma, vibrance: vibrance,
-            colour: color, tint: diagnosticTint, fog: fog)
+            colour: color, tint: diagnosticTint, fog: fog, ao: ao)
     }
 
     func launchInjected(_ game: GameLibrary.Game) {

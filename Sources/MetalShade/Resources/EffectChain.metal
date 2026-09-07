@@ -27,6 +27,7 @@ struct Uniforms {
     float4 domainMax;
     float4 fog;       // x amount, y depth scale
     float4 fogColour; // rgb
+    float4 ao;        // x strength, y radius scale, z bias, w range
 };
 
 struct BlurParams { float4 direction; };  // xy = step in UV space
@@ -161,16 +162,76 @@ float3 applyFog(float3 c, float depth, constant Uniforms& u) {
     return mix(c, u.fogColour.rgb, saturate(density) * u.fog.x);
 }
 
+/// Screen-space ambient occlusion from depth alone.
+///
+/// No surface normals are available — a hook at presentation sees a finished
+/// colour image and a depth buffer, nothing else — so occlusion is estimated by
+/// counting neighbours that sit nearer the camera than the centre. That is
+/// coarser than a normal-aware estimator and cannot tell a crease from a
+/// silhouette edge, but it needs nothing the game does not already hand us.
+float ambientOcclusion(depth2d<float> depthTex, sampler s, float2 uv, constant Uniforms& u) {
+    float centre = depthTex.sample(s, uv);
+    // Nothing rendered here: sky, and the game's own interface. Both must be
+    // left alone, since this runs after the interface has been composited.
+    if (centre <= 0.0) { return 1.0; }
+
+    // Reversed-Z, so distance is the reciprocal of depth.
+    float centreDistance = 1.0 / centre;
+
+    // A fixed world-space radius covers fewer pixels further away, which is what
+    // stops distant geometry from smearing into a haze.
+    float radius = clamp(u.ao.y / centreDistance, 0.0008, 0.02);
+
+    const float2 taps[8] = {
+        float2( 1.0,  0.0), float2( 0.707,  0.707), float2( 0.0,  1.0), float2(-0.707,  0.707),
+        float2(-1.0,  0.0), float2(-0.707, -0.707), float2( 0.0, -1.0), float2( 0.707, -0.707)
+    };
+    // Rotate the tap pattern per pixel, or eight fixed directions band visibly.
+    float angle = fract(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    float cosA = cos(angle), sinA = sin(angle);
+
+    float occlusion = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        float2 tap = float2(taps[i].x * cosA - taps[i].y * sinA,
+                            taps[i].x * sinA + taps[i].y * cosA);
+        float sampled = depthTex.sample(s, uv + tap * radius);
+        if (sampled <= 0.0) { continue; }
+        float delta = centreDistance - (1.0 / sampled);
+        // The bias ignores a surface occluding itself; the range ignores anything
+        // so much nearer that it is a separate object rather than a crease.
+        if (delta > u.ao.z && delta < u.ao.w) { occlusion += 1.0; }
+    }
+    return 1.0 - saturate(occlusion / 8.0) * u.ao.x;
+}
+
+/// Writes occlusion to its own target so it can be blurred before use.
+///
+/// The estimator rotates its sample pattern per pixel, which trades banding for
+/// high-frequency grain. Applying that directly to the image looks like noise;
+/// blurring it first is what makes it read as shading.
+fragment float4 aoFragment(VertexOut in [[stage_in]],
+                           depth2d<float> sceneDepth [[texture(0)]],
+                           constant Uniforms& u [[buffer(0)]]) {
+    constexpr sampler depthSampler(address::clamp_to_edge, filter::nearest);
+    float ao = ambientOcclusion(sceneDepth, depthSampler, in.uv, u);
+    return float4(ao, ao, ao, 1.0);
+}
+
 fragment float4 compositeFragment(VertexOut in [[stage_in]],
                                   texture2d<float> src [[texture(0)]],
                                   texture2d<float> bloom [[texture(1)]],
                                   texture3d<float> lut [[texture(2)]],
                                   depth2d<float> sceneDepth [[texture(3)]],
+                                  texture2d<float> occlusion [[texture(4)]],
                                   constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     constexpr sampler depthSampler(address::clamp_to_edge, filter::nearest);
     float3 c = src.sample(s, in.uv).rgb;
 
+    // Occlusion first: it is a lighting term, so it belongs before the effects
+    // that shape and grade the light. Sampled from the blurred pass rather than
+    // computed here, or its per-pixel noise lands directly on the image.
+    if (u.ao.x > 0.0) { c *= occlusion.sample(s, in.uv).r; }
     c = applySharpen(src, s, in.uv, c, u.a.x);
     c = applyClarity(src, s, in.uv, c, u.a.y);
     if (u.a.w > 0.0) { c += bloom.sample(s, in.uv).rgb * u.a.w; }

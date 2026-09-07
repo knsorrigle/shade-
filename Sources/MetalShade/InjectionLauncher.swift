@@ -20,6 +20,8 @@ struct EffectSettings {
     var tint = false
     /// Depth fog. Only the injection route can supply the depth it needs.
     var fog: Float = 0
+    /// Ambient occlusion, also depth-dependent and so injection-only.
+    var ao: Float = 0
 
     var json: [String: Any] {
         [
@@ -30,6 +32,7 @@ struct EffectSettings {
             "saturation": colour.saturation, "temperature": colour.temperature,
             "tint": tint,
             "fog": fog,
+            "ao": ao,
         ]
     }
 }

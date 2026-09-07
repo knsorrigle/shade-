@@ -79,6 +79,7 @@ typedef struct {
     float domainMax[4];
     float fog[4];        // x amount, y depth scale
     float fogColour[4];
+    float ao[4];         // x strength, y radius scale, z bias, w range
 } MSUniforms;
 
 typedef struct { float direction[4]; } MSBlurParams;
@@ -86,6 +87,8 @@ typedef struct { float direction[4]; } MSBlurParams;
 static id<MTLRenderPipelineState> gComposite = nil;
 static id<MTLRenderPipelineState> gBrightPass = nil;
 static id<MTLRenderPipelineState> gBlur = nil;
+static id<MTLRenderPipelineState> gAOPass = nil;
+static id<MTLTexture> gAOA = nil, gAOB = nil, gAOWhite = nil;
 static id<MTLTexture> gScratch = nil, gBloomA = nil, gBloomB = nil, gLUT = nil;
 static id<MTLTexture> gDepthStub = nil;
 /// Our own copy of the scene depth.
@@ -95,6 +98,11 @@ static id<MTLTexture> gDepthStub = nil;
 /// resolvable but not sampleable as bound. Copying first makes them ours to read.
 static id<MTLTexture> gDepthCopy = nil;
 static BOOL UpdateDepthCopy(id<MTLCommandBuffer> commandBuffer);
+static void SurveyDepthCandidates(id<MTLCommandBuffer> commandBuffer);
+/// Set once a depth target has been confirmed by its contents rather than by
+/// its shape. Until then the choice is a guess, and the guess is wrong: the
+/// largest matching target holds a mask, not geometry.
+static BOOL gDepthConfirmed = NO;
 
 static float gSharpen = 0, gClarity = 0, gTone = 0, gBloom = 0, gBloomThreshold = 0.8f;
 static float gExposure = 0, gGamma = 1.0f, gVibrance = 0;
@@ -102,6 +110,9 @@ static float gBrightness = 0, gContrast = 1.0f, gSaturation = 1.0f, gTemperature
 /// Depth fog. The scale maps reversed-Z, where the scene occupies a few
 /// thousandths, onto 0..1; 128 matches what Cyberpunk 2077 produces.
 static float gFog = 0, gFogScale = 0.0003f;
+/// Ambient occlusion. Radius is in the same reciprocal-depth units as distance,
+/// so it shrinks on screen as geometry recedes.
+static float gAO = 0, gAORadius = 2.0f, gAOBias = 0.5f, gAORange = 20.0f;
 static float gFogR = 0.62f, gFogG = 0.68f, gFogB = 0.76f;
 static BOOL gTint = NO;
 static BOOL gDisabled = NO;
@@ -138,6 +149,10 @@ static void ApplySettingsFile(void) {
     gFogR           = ReadNumber(json, @"fogR", gFogR);
     gFogG           = ReadNumber(json, @"fogG", gFogG);
     gFogB           = ReadNumber(json, @"fogB", gFogB);
+    gAO             = ReadNumber(json, @"ao", gAO);
+    gAORadius       = ReadNumber(json, @"aoRadius", gAORadius);
+    gAOBias         = ReadNumber(json, @"aoBias", gAOBias);
+    gAORange        = ReadNumber(json, @"aoRange", gAORange);
     NSNumber *tint = json[@"tint"];
     if ([tint isKindOfClass:[NSNumber class]]) { gTint = tint.boolValue; }
 }
@@ -156,9 +171,11 @@ static void ReadSettings(void) {
     ApplySettingsFile();
     MSLog(@"settings: sharpen %.2f clarity %.2f tone %.2f bloom %.2f | "
           @"exposure %+.2f gamma %.2f vibrance %+.2f | "
-          @"brightness %+.2f contrast %.2f saturation %.2f temperature %+.2f | tint %@",
+          @"brightness %+.2f contrast %.2f saturation %.2f temperature %+.2f | "
+          @"fog %.2f ao %.2f | tint %@",
           gSharpen, gClarity, gTone, gBloom, gExposure, gGamma, gVibrance,
-          gBrightness, gContrast, gSaturation, gTemperature, gTint ? @"on" : @"off");
+          gBrightness, gContrast, gSaturation, gTemperature, gFog, gAO,
+          gTint ? @"on" : @"off");
 }
 
 /// Polls rather than watching: the file is tiny, half a second is responsive
@@ -179,7 +196,7 @@ static void StartSettingsPolling(void) {
 /// so an idle session costs the game nothing.
 static BOOL HasVisibleEffect(void) {
     return gTint || gSharpen > 0.001f || gClarity > 0.001f || gTone > 0.001f || gBloom > 0.001f
-        || gFog > 0.001f
+        || gFog > 0.001f || gAO > 0.001f
         || fabsf(gExposure) > 0.001f || fabsf(gGamma - 1.0f) > 0.001f
         || fabsf(gVibrance) > 0.001f || fabsf(gBrightness) > 0.001f
         || fabsf(gContrast - 1.0f) > 0.001f || fabsf(gSaturation - 1.0f) > 0.001f
@@ -216,7 +233,8 @@ static BOOL EnsurePipelines(id<MTLDevice> device, MTLPixelFormat format) {
     gComposite  = MakePipeline(device, library, @"compositeFragment", format);
     gBrightPass = MakePipeline(device, library, @"brightPassFragment", format);
     gBlur       = MakePipeline(device, library, @"blurFragment", format);
-    if (!gComposite || !gBrightPass || !gBlur) { return NO; }
+    gAOPass     = MakePipeline(device, library, @"aoFragment", format);
+    if (!gComposite || !gBrightPass || !gBlur || !gAOPass) { return NO; }
 
     // The composite always samples a depth texture too. A 1x1 stand-in keeps it
     // valid when no scene depth has been found, and fog is forced off in that
@@ -227,6 +245,17 @@ static BOOL EnsurePipelines(id<MTLDevice> device, MTLPixelFormat format) {
     depthStub.usage = MTLTextureUsageShaderRead;
     depthStub.storageMode = MTLStorageModePrivate;
     gDepthStub = [device newTextureWithDescriptor:depthStub];
+
+    // Occlusion multiplies the image, so its stand-in must be white.
+    MTLTextureDescriptor *whiteDescriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                           width:1 height:1 mipmapped:NO];
+    whiteDescriptor.usage = MTLTextureUsageShaderRead;
+    whiteDescriptor.storageMode = MTLStorageModeShared;
+    gAOWhite = [device newTextureWithDescriptor:whiteDescriptor];
+    uint8_t white[4] = { 255, 255, 255, 255 };
+    [gAOWhite replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0
+                  withBytes:white bytesPerRow:4];
 
     // The composite always samples a LUT; a 2x2x2 identity keeps it valid when
     // none is loaded, rather than leaving an unbound texture to sample.
@@ -263,7 +292,11 @@ static BOOL EnsureTextures(id<MTLDevice> device, id<MTLTexture> target) {
     // sixteenth of the work.
     gBloomA = MakeTarget(device, target.width / 4, target.height / 4, target.pixelFormat);
     gBloomB = MakeTarget(device, target.width / 4, target.height / 4, target.pixelFormat);
-    return gScratch && gBloomA && gBloomB;
+    // Occlusion at half resolution: it is blurred anyway, and this is the term
+    // that costs eight depth samples per pixel.
+    gAOA = MakeTarget(device, target.width / 2, target.height / 2, target.pixelFormat);
+    gAOB = MakeTarget(device, target.width / 2, target.height / 2, target.pixelFormat);
+    return gScratch && gBloomA && gBloomB && gAOA && gAOB;
 }
 
 static void FullscreenPass(id<MTLCommandBuffer> commandBuffer, id<MTLTexture> destination,
@@ -294,6 +327,15 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
     if (!EnsurePipelines(device, target.pixelFormat)) { gDisabled = YES; return; }
     if (!EnsureTextures(device, target)) { gDisabled = YES; return; }
 
+    // Keep surveying until a target is confirmed by contents. Depth is otherwise
+    // chosen by shape, and the largest matching target holds a mask; the loading
+    // screen also leaves every target legitimately empty, so one survey proves
+    // nothing.
+    if (!gDepthConfirmed && (gFog > 0.001f || gAO > 0.001f)) {
+        static uint64_t frames = 0;
+        if (frames++ % 240 == 1) { SurveyDepthCandidates(commandBuffer); }
+    }
+
     MSUniforms uniforms = {
         { gSharpen, gClarity, gTone, gBloom },
         { gBloomThreshold, gExposure, gGamma, gVibrance },
@@ -304,6 +346,7 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
         { 1, 1, 1, 0 },
         { gDepthCopy ? gFog : 0.0f, gFogScale, 0, 0 },
         { gFogR, gFogG, gFogB, 0 },
+        { gDepthCopy ? gAO : 0.0f, gAORadius, gAOBias, gAORange },
     };
 
     // A texture cannot be read and written in one pass, so the frame goes to
@@ -315,6 +358,19 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
                 toTexture:gScratch destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
+
+    if (gAO > 0.001f && gDepthCopy && gAOA && gAOB) {
+        FullscreenPass(commandBuffer, gAOA, gAOPass, @[gDepthCopy],
+                       &uniforms, sizeof(uniforms));
+        // Blur the occlusion, not the image: the estimator's per-pixel rotation
+        // is what produces the grain, and it has to go before it is applied.
+        MSBlurParams horizontal = {{ 1.0f / (float)gAOA.width, 0, 0, 0 }};
+        FullscreenPass(commandBuffer, gAOB, gBlur, @[gAOA],
+                       &horizontal, sizeof(horizontal));
+        MSBlurParams vertical = {{ 0, 1.0f / (float)gAOA.height, 0, 0 }};
+        FullscreenPass(commandBuffer, gAOA, gBlur, @[gAOB],
+                       &vertical, sizeof(vertical));
+    }
 
     if (gBloom > 0.001f) {
         FullscreenPass(commandBuffer, gBloomA, gBrightPass, @[gScratch],
@@ -337,6 +393,7 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
     [encoder setFragmentTexture:gBloomA ?: gScratch atIndex:1];
     [encoder setFragmentTexture:gLUT atIndex:2];
     [encoder setFragmentTexture:gDepthCopy ?: gDepthStub atIndex:3];
+    [encoder setFragmentTexture:(gAO > 0.001f && gAOA) ? gAOA : gAOWhite atIndex:4];
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
@@ -849,8 +906,9 @@ static void SurveyDepthCandidates(id<MTLCommandBuffer> commandBuffer) {
                   hasData ? @"<-- HAS DATA" : @"uniform",
                   values[0], values[2], values[4], values[6], values[8]);
             if (hasData) {
-                // Contents decide, not size: switch the view to whatever is
-                // actually carrying the frame's geometry.
+                // Contents decide, not size: switch to whatever is actually
+                // carrying the frame's geometry.
+                gDepthConfirmed = YES;
                 @synchronized (gSeenDepth) {
                     if (gSceneDepth != probeSource) {
                         gSceneDepth = probeSource;
@@ -969,7 +1027,7 @@ static void MS_commit(id self, SEL _cmd) {
             wroteDepth = gBuffersWithDepth && [gBuffersWithDepth containsObject:self];
             if (wroteDepth) { [gBuffersWithDepth removeObject:self]; }
         }
-        if (wroteDepth && (gFog > 0.001f || gShowDepth)) {
+        if (wroteDepth && (gFog > 0.001f || gAO > 0.001f || gShowDepth)) {
             UpdateDepthCopy((id<MTLCommandBuffer>)self);
         }
     } @catch (NSException *exception) {

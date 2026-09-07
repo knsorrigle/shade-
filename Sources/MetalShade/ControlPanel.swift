@@ -204,6 +204,7 @@ struct ControlPanelView: View {
             LabeledSlider(title: "Bloom threshold", value: $model.bloomThreshold, range: 0...1, format: .plain)
             LabeledSlider(title: "Filmic tone", value: $model.tone, range: 0...1, format: .percent)
 
+            LabeledSlider(title: "Ambient occlusion", value: $model.ao, range: 0...1, format: .percent)
             LabeledSlider(title: "Depth fog", value: $model.fog, range: 0...1, format: .percent)
             Text(model.fogAvailable
                  ? "Uses the game's own depth buffer, read from inside the process."
