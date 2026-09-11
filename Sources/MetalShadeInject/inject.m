@@ -99,6 +99,7 @@ static id<MTLTexture> gDepthStub = nil;
 static id<MTLTexture> gDepthCopy = nil;
 static BOOL UpdateDepthCopy(id<MTLCommandBuffer> commandBuffer);
 static void SurveyDepthCandidates(id<MTLCommandBuffer> commandBuffer);
+static void PrintAOThumbnail(id<MTLCommandBuffer> commandBuffer);
 /// Set once a depth target has been confirmed by its contents rather than by
 /// its shape. Until then the choice is a guess, and the guess is wrong: the
 /// largest matching target holds a mask, not geometry.
@@ -327,6 +328,23 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
     if (!EnsurePipelines(device, target.pixelFormat)) { gDisabled = YES; return; }
     if (!EnsureTextures(device, target)) { gDisabled = YES; return; }
 
+    {
+        // Depth and the drawable are different sizes, and if their aspect ratios
+        // also differ then sampling depth with the drawable's UV misaligns them.
+        static BOOL reported = NO;
+        if (!reported && gDepthCopy) {
+            reported = YES;
+            double drawableAspect = (double)target.width / (double)target.height;
+            double depthAspect = (double)gDepthCopy.width / (double)gDepthCopy.height;
+            MSLog(@"drawable %lux%lu (aspect %.4f) vs depth %lux%lu (aspect %.4f) — %@",
+                  (unsigned long)target.width, (unsigned long)target.height, drawableAspect,
+                  (unsigned long)gDepthCopy.width, (unsigned long)gDepthCopy.height, depthAspect,
+                  fabs(drawableAspect - depthAspect) < 0.005
+                      ? @"match, UV maps directly"
+                      : @"MISMATCH, UV sampling is misaligned");
+        }
+    }
+
     // Keep surveying until a target is confirmed by contents. Depth is otherwise
     // chosen by shape, and the largest matching target holds a mask; the loading
     // screen also leaves every target legitimately empty, so one survey proves
@@ -364,12 +382,17 @@ static void ProcessDrawable(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawab
                        &uniforms, sizeof(uniforms));
         // Blur the occlusion, not the image: the estimator's per-pixel rotation
         // is what produces the grain, and it has to go before it is applied.
-        MSBlurParams horizontal = {{ 1.0f / (float)gAOA.width, 0, 0, 0 }};
+        MSBlurParams horizontal = {{ 2.5f / (float)gAOA.width, 0, 0, 0 }};
         FullscreenPass(commandBuffer, gAOB, gBlur, @[gAOA],
                        &horizontal, sizeof(horizontal));
-        MSBlurParams vertical = {{ 0, 1.0f / (float)gAOA.height, 0, 0 }};
+        MSBlurParams vertical = {{ 0, 2.5f / (float)gAOA.height, 0, 0 }};
         FullscreenPass(commandBuffer, gAOA, gBlur, @[gAOB],
                        &vertical, sizeof(vertical));
+    }
+
+    if (gAO > 0.001f && gDepthCopy && getenv("METALSHADE_SHOW_AO")) {
+        static uint64_t frames = 0;
+        if (frames++ % 300 == 1) { PrintAOThumbnail(commandBuffer); }
     }
 
     if (gBloom > 0.001f) {
@@ -1034,6 +1057,52 @@ static void MS_commit(id self, SEL _cmd) {
         MSLog(@"depth capture at commit disabled: %@", exception.reason);
     }
     ((void (*)(id, SEL))gOriginalCommit)(self, _cmd);
+}
+
+/// Prints the occlusion buffer as text, the same way depth was checked.
+///
+/// Judging occlusion by eye needs the game loaded and a scene with creases in
+/// it. A coarse picture answers the question that actually matters — whether
+/// flat surfaces are being left alone — without that.
+static void PrintAOThumbnail(id<MTLCommandBuffer> commandBuffer) {
+    if (!gAOA || !gBlur) { return; }
+    const NSUInteger width = 48, height = 24;
+    static id<MTLTexture> thumbnail = nil;
+    if (!thumbnail) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                               width:width height:height
+                                                           mipmapped:NO];
+        descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModeShared;
+        thumbnail = [gAOA.device newTextureWithDescriptor:descriptor];
+        if (!thumbnail) { return; }
+    }
+
+    // A zero-direction blur is a passthrough, which downsamples through the
+    // sampler rather than needing another pipeline.
+    MSBlurParams none = {{ 0, 0, 0, 0 }};
+    FullscreenPass(commandBuffer, thumbnail, gBlur, @[gAOA], &none, sizeof(none));
+
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull done) {
+        uint8_t pixels[24 * 48 * 4];
+        [thumbnail getBytes:pixels bytesPerRow:width * 4
+                 fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        const char *ramp = "@%#*+=-:. ";   // dark occluded -> light open
+        NSMutableString *picture = [NSMutableString stringWithString:@"\n"];
+        uint8_t low = 255, high = 0;
+        for (NSUInteger y = 0; y < height; ++y) {
+            NSMutableString *row = [NSMutableString string];
+            for (NSUInteger x = 0; x < width; ++x) {
+                uint8_t v = pixels[(y * width + x) * 4 + 1];
+                low = MIN(low, v); high = MAX(high, v);
+                [row appendFormat:@"%c", ramp[(v * 9) / 255]];
+            }
+            [picture appendFormat:@"  |%@|\n", row];
+        }
+        MSLog(@"occlusion (%d..%d of 255; mostly light means flat surfaces are "
+              @"being left alone):%@", low, high, picture);
+    }];
 }
 
 #pragma mark - Entry point

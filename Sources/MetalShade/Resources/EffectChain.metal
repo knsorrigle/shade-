@@ -164,42 +164,93 @@ float3 applyFog(float3 c, float depth, constant Uniforms& u) {
 
 /// Screen-space ambient occlusion from depth alone.
 ///
-/// No surface normals are available — a hook at presentation sees a finished
-/// colour image and a depth buffer, nothing else — so occlusion is estimated by
-/// counting neighbours that sit nearer the camera than the centre. That is
-/// coarser than a normal-aware estimator and cannot tell a crease from a
-/// silhouette edge, but it needs nothing the game does not already hand us.
+/// No surface normals are provided — a hook at presentation sees a finished
+/// colour image and a depth buffer — so they are reconstructed from the depth
+/// gradient. That matters more than it sounds: without a normal, the only test
+/// available is "is this neighbour nearer than the centre", and on any surface
+/// tilting away from the camera roughly half the neighbours always are. Every
+/// flat surface then reads as half-occluded and darkens uniformly, which no
+/// amount of bias tuning removes because the error depends on the tilt.
+///
+/// With a normal, occlusion is only counted for samples above the surface's own
+/// tangent plane, so a flat plane occludes itself by nothing at all.
+
+/// A position in a pseudo view space. The lateral scale is arbitrary — the true
+/// one needs the projection's field of view — but it is applied consistently to
+/// the centre and its neighbours, so directions and angles between them are
+/// correct even though absolute units are not.
+float3 depthPosition(depth2d<float> tex, sampler s, float2 uv, float aspect) {
+    float d = tex.sample(s, uv);
+    float distance = (d > 0.0) ? (1.0 / d) : 0.0;
+    return float3((uv.x - 0.5) * aspect * distance, (uv.y - 0.5) * distance, distance);
+}
+
+/// Reconstructs a normal from neighbouring depths, taking the nearer neighbour
+/// on each axis so a silhouette edge does not drag the normal with it.
+float3 reconstructNormal(depth2d<float> tex, sampler s, float2 uv, float2 texel, float aspect) {
+    float3 centre = depthPosition(tex, s, uv, aspect);
+    float3 right  = depthPosition(tex, s, uv + float2(texel.x, 0), aspect);
+    float3 left   = depthPosition(tex, s, uv - float2(texel.x, 0), aspect);
+    float3 down   = depthPosition(tex, s, uv + float2(0, texel.y), aspect);
+    float3 up     = depthPosition(tex, s, uv - float2(0, texel.y), aspect);
+
+    float3 dx = (abs(right.z - centre.z) < abs(centre.z - left.z)) ? (right - centre) : (centre - left);
+    float3 dy = (abs(down.z - centre.z) < abs(centre.z - up.z)) ? (down - centre) : (centre - up);
+
+    float3 normal = cross(dx, dy);
+    float len = length(normal);
+    return (len > 1e-8) ? (normal / len) : float3(0.0, 0.0, 1.0);
+}
+
 float ambientOcclusion(depth2d<float> depthTex, sampler s, float2 uv, constant Uniforms& u) {
-    float centre = depthTex.sample(s, uv);
-    // Nothing rendered here: sky, and the game's own interface. Both must be
-    // left alone, since this runs after the interface has been composited.
-    if (centre <= 0.0) { return 1.0; }
+    float centreDepth = depthTex.sample(s, uv);
+    // Nothing rendered here: sky, and the game's own interface. Both must be left
+    // alone, since this runs after the interface has been composited.
+    if (centreDepth <= 0.0) { return 1.0; }
 
-    // Reversed-Z, so distance is the reciprocal of depth.
-    float centreDistance = 1.0 / centre;
+    float width = float(depthTex.get_width());
+    float height = float(depthTex.get_height());
+    float aspect = width / height;
+    float2 texel = float2(1.0 / width, 1.0 / height);
 
-    // A fixed world-space radius covers fewer pixels further away, which is what
-    // stops distant geometry from smearing into a haze.
-    float radius = clamp(u.ao.y / centreDistance, 0.0008, 0.02);
+    float3 centre = depthPosition(depthTex, s, uv, aspect);
+    float3 normal = reconstructNormal(depthTex, s, uv, texel, aspect);
+
+    // A fixed world radius covers fewer pixels further away, which is what stops
+    // distant geometry from smearing.
+    float radius = clamp(u.ao.y / centre.z, 0.0015, 0.03);
 
     const float2 taps[8] = {
         float2( 1.0,  0.0), float2( 0.707,  0.707), float2( 0.0,  1.0), float2(-0.707,  0.707),
         float2(-1.0,  0.0), float2(-0.707, -0.707), float2( 0.0, -1.0), float2( 0.707, -0.707)
     };
-    // Rotate the tap pattern per pixel, or eight fixed directions band visibly.
+    // Rotate the pattern per pixel, or eight fixed directions band visibly. The
+    // grain this produces is removed by blurring the occlusion pass.
     float angle = fract(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
     float cosA = cos(angle), sinA = sin(angle);
 
+    float range = u.ao.w * centre.z * 0.02;
     float occlusion = 0.0;
     for (int i = 0; i < 8; ++i) {
         float2 tap = float2(taps[i].x * cosA - taps[i].y * sinA,
                             taps[i].x * sinA + taps[i].y * cosA);
-        float sampled = depthTex.sample(s, uv + tap * radius);
+        float2 sampleUV = uv + tap * radius;
+        float sampled = depthTex.sample(s, sampleUV);
         if (sampled <= 0.0) { continue; }
-        float delta = centreDistance - (1.0 / sampled);
-        // The bias ignores a surface occluding itself; the range ignores anything
-        // so much nearer that it is a separate object rather than a crease.
-        if (delta > u.ao.z && delta < u.ao.w) { occlusion += 1.0; }
+
+        float3 offset = depthPosition(depthTex, s, sampleUV, aspect) - centre;
+        float length2 = dot(offset, offset);
+        if (length2 < 1e-10) { continue; }
+        float distance = sqrt(length2);
+
+        // How far the sample sits above this surface's own tangent plane. A
+        // neighbour lying on the same plane gives zero, which is what makes a
+        // flat surface occlude itself by nothing.
+        float above = dot(normal, offset / distance);
+        if (above <= u.ao.z) { continue; }
+
+        // Nearby occluders count for more than distant ones.
+        occlusion += above * saturate(range / distance);
     }
     return 1.0 - saturate(occlusion / 8.0) * u.ao.x;
 }
