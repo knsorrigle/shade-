@@ -25,6 +25,9 @@ struct Uniforms {
     float4 lut;       // x mix
     float4 domainMin; // LUT input domain
     float4 domainMax;
+    float4 fog;       // x amount, y depth scale
+    float4 fogColour; // rgb
+    float4 ao;        // x strength, y radius scale, z bias, w range
 };
 
 struct BlurParams { float4 direction; };  // xy = step in UV space
@@ -135,17 +138,157 @@ float3 applyGrade(float3 c, constant Uniforms& u) {
 
 // MARK: - Composite
 
+/// Depth fog: the first effect here that uses scene geometry rather than colour
+/// alone.
+///
+/// Depth is reversed-Z, so distant geometry sits near zero and the whole scene
+/// occupies a few thousandths. The scale brings that into 0..1; fog then grows
+/// with distance. Sky, which never had geometry written, reads as maximally
+/// distant and fogs fully — which is what it should do.
+float3 applyFog(float3 c, float depth, constant Uniforms& u) {
+    if (u.fog.x <= 0.0) { return c; }
+    // Nothing was rendered here. Both sky and the game's own HUD and menus leave
+    // depth untouched, and this effect runs after the game has composited them,
+    // so without this the interface fogs along with the world. Leaving the sky
+    // unfogged is the cost; fogging the menu is not acceptable.
+    if (depth <= 0.0) { return c; }
+    // Reversed-Z: distance is inversely proportional to depth, not linear in it.
+    // Treating depth as linear fogged everything past a few metres solid, because
+    // the entire scene occupies a few thousandths at the near end of the range.
+    float distance = 1.0 / max(depth, 1e-6);
+    // Exponential falloff, the standard atmospheric model: near stays clear and
+    // density accumulates with distance rather than switching on at a threshold.
+    float density = 1.0 - exp(-distance * u.fog.y);
+    return mix(c, u.fogColour.rgb, saturate(density) * u.fog.x);
+}
+
+/// Screen-space ambient occlusion from depth alone.
+///
+/// No surface normals are provided — a hook at presentation sees a finished
+/// colour image and a depth buffer — so they are reconstructed from the depth
+/// gradient. That matters more than it sounds: without a normal, the only test
+/// available is "is this neighbour nearer than the centre", and on any surface
+/// tilting away from the camera roughly half the neighbours always are. Every
+/// flat surface then reads as half-occluded and darkens uniformly, which no
+/// amount of bias tuning removes because the error depends on the tilt.
+///
+/// With a normal, occlusion is only counted for samples above the surface's own
+/// tangent plane, so a flat plane occludes itself by nothing at all.
+
+/// A position in a pseudo view space. The lateral scale is arbitrary — the true
+/// one needs the projection's field of view — but it is applied consistently to
+/// the centre and its neighbours, so directions and angles between them are
+/// correct even though absolute units are not.
+float3 depthPosition(depth2d<float> tex, sampler s, float2 uv, float aspect) {
+    float d = tex.sample(s, uv);
+    float distance = (d > 0.0) ? (1.0 / d) : 0.0;
+    return float3((uv.x - 0.5) * aspect * distance, (uv.y - 0.5) * distance, distance);
+}
+
+/// Reconstructs a normal from neighbouring depths, taking the nearer neighbour
+/// on each axis so a silhouette edge does not drag the normal with it.
+float3 reconstructNormal(depth2d<float> tex, sampler s, float2 uv, float2 texel, float aspect) {
+    float3 centre = depthPosition(tex, s, uv, aspect);
+    float3 right  = depthPosition(tex, s, uv + float2(texel.x, 0), aspect);
+    float3 left   = depthPosition(tex, s, uv - float2(texel.x, 0), aspect);
+    float3 down   = depthPosition(tex, s, uv + float2(0, texel.y), aspect);
+    float3 up     = depthPosition(tex, s, uv - float2(0, texel.y), aspect);
+
+    float3 dx = (abs(right.z - centre.z) < abs(centre.z - left.z)) ? (right - centre) : (centre - left);
+    float3 dy = (abs(down.z - centre.z) < abs(centre.z - up.z)) ? (down - centre) : (centre - up);
+
+    float3 normal = cross(dx, dy);
+    float len = length(normal);
+    return (len > 1e-8) ? (normal / len) : float3(0.0, 0.0, 1.0);
+}
+
+float ambientOcclusion(depth2d<float> depthTex, sampler s, float2 uv, constant Uniforms& u) {
+    float centreDepth = depthTex.sample(s, uv);
+    // Nothing rendered here: sky, and the game's own interface. Both must be left
+    // alone, since this runs after the interface has been composited.
+    if (centreDepth <= 0.0) { return 1.0; }
+
+    float width = float(depthTex.get_width());
+    float height = float(depthTex.get_height());
+    float aspect = width / height;
+    float2 texel = float2(1.0 / width, 1.0 / height);
+
+    float3 centre = depthPosition(depthTex, s, uv, aspect);
+    float3 normal = reconstructNormal(depthTex, s, uv, texel, aspect);
+
+    // A fixed world radius covers fewer pixels further away, which is what stops
+    // distant geometry from smearing.
+    float radius = clamp(u.ao.y / centre.z, 0.0015, 0.03);
+
+    const float2 taps[8] = {
+        float2( 1.0,  0.0), float2( 0.707,  0.707), float2( 0.0,  1.0), float2(-0.707,  0.707),
+        float2(-1.0,  0.0), float2(-0.707, -0.707), float2( 0.0, -1.0), float2( 0.707, -0.707)
+    };
+    // Rotate the pattern per pixel, or eight fixed directions band visibly. The
+    // grain this produces is removed by blurring the occlusion pass.
+    float angle = fract(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    float cosA = cos(angle), sinA = sin(angle);
+
+    float range = u.ao.w * centre.z * 0.02;
+    float occlusion = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        float2 tap = float2(taps[i].x * cosA - taps[i].y * sinA,
+                            taps[i].x * sinA + taps[i].y * cosA);
+        float2 sampleUV = uv + tap * radius;
+        float sampled = depthTex.sample(s, sampleUV);
+        if (sampled <= 0.0) { continue; }
+
+        float3 offset = depthPosition(depthTex, s, sampleUV, aspect) - centre;
+        float length2 = dot(offset, offset);
+        if (length2 < 1e-10) { continue; }
+        float distance = sqrt(length2);
+
+        // How far the sample sits above this surface's own tangent plane. A
+        // neighbour lying on the same plane gives zero, which is what makes a
+        // flat surface occlude itself by nothing.
+        float above = dot(normal, offset / distance);
+        if (above <= u.ao.z) { continue; }
+
+        // Nearby occluders count for more than distant ones.
+        occlusion += above * saturate(range / distance);
+    }
+    return 1.0 - saturate(occlusion / 8.0) * u.ao.x;
+}
+
+/// Writes occlusion to its own target so it can be blurred before use.
+///
+/// The estimator rotates its sample pattern per pixel, which trades banding for
+/// high-frequency grain. Applying that directly to the image looks like noise;
+/// blurring it first is what makes it read as shading.
+fragment float4 aoFragment(VertexOut in [[stage_in]],
+                           depth2d<float> sceneDepth [[texture(0)]],
+                           constant Uniforms& u [[buffer(0)]]) {
+    constexpr sampler depthSampler(address::clamp_to_edge, filter::nearest);
+    float ao = ambientOcclusion(sceneDepth, depthSampler, in.uv, u);
+    return float4(ao, ao, ao, 1.0);
+}
+
 fragment float4 compositeFragment(VertexOut in [[stage_in]],
                                   texture2d<float> src [[texture(0)]],
                                   texture2d<float> bloom [[texture(1)]],
                                   texture3d<float> lut [[texture(2)]],
+                                  depth2d<float> sceneDepth [[texture(3)]],
+                                  texture2d<float> occlusion [[texture(4)]],
                                   constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
+    constexpr sampler depthSampler(address::clamp_to_edge, filter::nearest);
     float3 c = src.sample(s, in.uv).rgb;
 
+    // Occlusion first: it is a lighting term, so it belongs before the effects
+    // that shape and grade the light. Sampled from the blurred pass rather than
+    // computed here, or its per-pixel noise lands directly on the image.
+    if (u.ao.x > 0.0) { c *= occlusion.sample(s, in.uv).r; }
     c = applySharpen(src, s, in.uv, c, u.a.x);
     c = applyClarity(src, s, in.uv, c, u.a.y);
     if (u.a.w > 0.0) { c += bloom.sample(s, in.uv).rgb * u.a.w; }
+    // Fog before tone mapping, so the added light is shaped by the curve rather
+    // than sitting flat on top of it.
+    c = applyFog(c, sceneDepth.sample(depthSampler, in.uv), u);
     c = applyTone(c, u.a.z);
     c = applyGrade(c, u);
 

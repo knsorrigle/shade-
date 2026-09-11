@@ -18,6 +18,11 @@ struct EffectUniforms {
     var lut = SIMD4<Float>(0, 0, 0, 0)
     var domainMin = SIMD4<Float>(0, 0, 0, 0)
     var domainMax = SIMD4<Float>(1, 1, 1, 0)
+    /// Fog amount and depth scale. Always zero here: the overlay has no depth.
+    var fog = SIMD4<Float>(0, 0.0003, 0, 0)
+    var fogColour = SIMD4<Float>(0.62, 0.68, 0.76, 0)
+    /// Occlusion strength, radius, bias, range. Zero here: the overlay has no depth.
+    var ao = SIMD4<Float>(0, 2, 0.5, 20)
 }
 
 private struct BlurParams {
@@ -40,6 +45,12 @@ final class MetalRenderer {
     private var blurPipeline: MTLRenderPipelineState?
     private var lutTexture: MTLTexture?
     private var identityLUT: MTLTexture?
+    /// The chain always samples a depth texture. The overlay never has one — it
+    /// sees a finished colour image — so a 1x1 stand-in keeps the pipeline valid
+    /// and fog stays at zero.
+    private var depthStub: MTLTexture?
+    /// Occlusion multiplies the image, so its stand-in must be white.
+    private var occlusionStub: MTLTexture?
     private var bloomA: MTLTexture?
     private var bloomB: MTLTexture?
     private var bloomSize = CGSize.zero
@@ -182,6 +193,8 @@ final class MetalRenderer {
         // The composite always samples a LUT, so an identity keeps it valid when
         // none is loaded rather than leaving an unbound texture to sample.
         encoder.setFragmentTexture(lutTexture ?? identityLUT, index: 2)
+        encoder.setFragmentTexture(depthStub, index: 3)
+        encoder.setFragmentTexture(occlusionStub, index: 4)
         encoder.setFragmentBytes(&localUniforms, length: MemoryLayout<EffectUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -215,6 +228,8 @@ final class MetalRenderer {
         brightPassPipeline = try makePipeline(vertex: vertex, fragment: bright)
         blurPipeline = try makePipeline(vertex: vertex, fragment: blur)
         if identityLUT == nil { identityLUT = makeIdentityLUT() }
+        if depthStub == nil { depthStub = makeDepthStub() }
+        if occlusionStub == nil { occlusionStub = makeOcclusionStub() }
     }
 
     /// A 2x2x2 identity, so the composite's LUT sampler is always bound.
@@ -224,6 +239,26 @@ final class MetalRenderer {
         descriptor.pixelFormat = .rgba16Float
         descriptor.width = 2; descriptor.height = 2; descriptor.depth = 2
         descriptor.usage = .shaderRead
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    private func makeOcclusionStub() -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        var white: [UInt8] = [255, 255, 255, 255]
+        texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                        withBytes: &white, bytesPerRow: 4)
+        return texture
+    }
+
+    private func makeDepthStub() -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .private
         return device.makeTexture(descriptor: descriptor)
     }
 
